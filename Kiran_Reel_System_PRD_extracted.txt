@@ -1,0 +1,233 @@
+﻿PRODUCT REQUIREMENTS DOCUMENT
+Automated Reel Production System — Dr. Kiran
+Version 1.0  ·  June 2026  ·  Mithun
+
+1. Overview
+Build an end-to-end automated pipeline that takes a single topic as input and produces a fully scripted, voiced audio reel in Dr. Kiran&apos;s style — his personality, language, energy, and voice — ready for video production.
+
+Today, creating one reel requires manually writing a script, recording audio, and editing. This system eliminates all of that. One topic in. Kiran-style audio out.
+
+2. Problem Statement
+Creating one reel takes hours of manual work — scripting, recording, editing
+Scripts written by others don&apos;t sound like Kiran — wrong tone, structure, language mix
+Scaling content output is impossible without a repeatable system
+Kiran&apos;s voice, energy, and style exist only in his head — not yet captured as a system
+
+3. Goals
+Primary Goal
+Given a topic, automatically generate a script and audio that sounds exactly like Dr. Kiran — his Hinglish style, his emotional arc, his voice.
+
+Success Metrics
+Metric
+Target
+Script sounds like Kiran (human review)
+8/10 or above
+Voice clone match (human review)
+8/10 or above
+Time from topic to audio
+Under 2 minutes
+Script length accuracy
+130–150 words / 55–60 sec
+
+4. Scope
+In Scope — Phase 1 (Script Generator)
+Web UI to input a topic
+AI script generation using Kiran&apos;s personality profile
+Script output with section labels, emotion tags, b-roll cues, caption highlights
+Hook type selection (Type A / B / C) and severity control
+
+In Scope — Phase 2 (Voice Generation)
+Voice cloning from Kiran&apos;s existing video/audio samples
+Text-to-speech audio generation in Kiran&apos;s cloned voice
+Emotion-aware delivery — calm vs cautionary vs energetic sections
+Downloadable .mp3 output
+
+Out of Scope (Future Phases)
+Video editing and B-roll assembly — Phase 3
+Caption generation and overlay — Phase 3
+Multi-person support (other doctors) — Phase 4
+Multi-language support (Tamil, Telugu etc.) — Phase 4
+
+5. System Architecture
+
+Layer
+Component
+Technology
+Input
+Topic entry UI
+React web app
+Personality Engine
+Kiran&apos;s style + structure rules
+Claude API (system prompt)
+Script Generator
+Hinglish script with emotion tags
+Claude Sonnet 4
+Voice Clone
+Kiran&apos;s cloned voice model
+ElevenLabs Voice Clone
+Audio Generator
+Script → spoken audio
+ElevenLabs TTS API
+Output
+Script display + audio player + download
+React web app
+
+6. Personality Engine — Kiran&apos;s Profile
+The personality engine is the core of the system. It encodes everything that makes Kiran sound like Kiran. Built from 9+ analyzed reference videos and his production spec.
+
+Script Structure (every reel follows this)
+Section
+Time
+Purpose
+The Hook
+0:00 – 0:03
+Scroll-stopper. Parent question / shock / performance interrupt
+Problem Setup
+0:03 – 0:08
+Relatable parent worry in plain Hindi
+Explanation
+0:08 – 0:35
+Core teaching. B-roll heavy. Authority beats (WHO, stats)
+Solution
+0:35 – 0:48
+What to do. Wrong vs right contrast
+Reassurance
+0:48 – end
+Calm close. Share CTA only for serious topics
+
+Hook Types
+Type A — Voiced parent question: everyday concerns (most common)
+Type B — Shock statement or image: serious / safety topics
+Type C — Performance interrupt: rare, exaggerated then snaps serious
+
+Voice &amp; Tone Rules
+Default tone: calm, warm, authoritative — never shouts or over-emotes
+Language: natural Hindi/Hinglish — technical terms in English, delivery in Hindi
+Filler words: &apos;toh&apos;, &apos;matlab&apos;, &apos;basically&apos;, &apos;actually&apos;, &apos;dekho&apos;
+Addresses parents directly: &apos;parents&apos;, &apos;aap&apos;, &apos;aapka baby&apos;
+Sentences are short and punchy
+Emotion comes from editing + writing — not vocal performance
+
+Caption Highlights (yellow bold)
+Numbers and stats: &apos;2.2Kg&apos;, &apos;6-10 months&apos;, &apos;1000+ babies&apos;
+Medical terms: &apos;Lactose Intolerance&apos;, &apos;SIDS&apos;, &apos;neologism&apos;
+Pain-point phrases: &apos;bura asar&apos;, &apos;galat method&apos;
+
+7. Data &amp; Training Inputs
+Data
+Format
+Status
+Purpose
+9 video transcripts + analysis
+JSON
+Ready
+Script personality training
+Kiran&apos;s production spec
+DOCX
+Ready
+Structure + tone rules
+Kiran&apos;s video samples (20-30)
+MP4 on Google Drive
+To process
+Voice cloning
+Clean audio extracts
+MP3
+To extract
+ElevenLabs voice training
+
+8. Build Phases
+
+Phase
+What we build
+Status
+Deliverable
+Phase 1
+Script Generator UI
+In Progress
+Topic → Kiran-style script with tags
+Phase 2
+Voice Clone + Audio
+Next
+Script → Audio in Kiran&apos;s voice
+Phase 3
+Video Assembly
+Future
+Audio + B-roll → Edited reel
+Phase 4
+Multi-person / Multi-language
+Future
+Scale to other doctors + languages
+
+9. Phase 1 — Script Generator (Detailed)
+
+User Flow
+User opens web app
+Types a topic (Hindi or English)
+Selects hook type (Auto / A / B / C) and severity (Auto / Everyday / Serious)
+Clicks Generate
+Sees full script broken into sections with emotion tags, b-roll cues, caption highlights
+Can copy the full script with one click
+
+Script Output Format
+Section label + time range (e.g. THE HOOK · 0:00–0:03)
+Emotion tag per section (ENERGETIC / CAUTIONARY / CALM / WARM)
+Script text with yellow highlights on key words
+B-roll cue per section (what to show visually)
+Stats: word count, estimated duration, hook type used
+CTA recommendation badge for serious topics
+
+Technical Stack
+Frontend: React (single page app)
+API: Claude Sonnet 4 via Anthropic API
+System prompt: Kiran&apos;s full personality profile encoded
+Output: JSON parsed and rendered as structured UI
+
+10. Phase 2 — Voice Generation (Detailed)
+
+Voice Cloning Setup
+Extract clean audio from 20-30 Kiran videos (remove background music)
+Upload to ElevenLabs Professional Voice Clone
+Minimum 10-15 minutes of clean audio needed
+Multiple emotional tones captured: calm, energetic, serious
+
+Audio Generation Flow
+Script sections fed to ElevenLabs with emotion parameters
+Each section rendered with matching voice tone
+Sections stitched into one continuous audio file
+Output: downloadable .mp3, 55-60 seconds
+
+Technical Stack
+Voice cloning: ElevenLabs Professional Voice Clone API
+TTS: ElevenLabs Text-to-Speech API
+Audio processing: ffmpeg for stitching sections
+Storage: Google Drive or local download
+
+11. Risks &amp; Mitigations
+Risk
+Impact
+Mitigation
+Voice clone doesn&apos;t sound natural
+High
+Use 15+ min of clean audio; test multiple ElevenLabs models
+Script doesn&apos;t sound like Kiran
+High
+Expand training data to 20+ videos; human review loop
+Background music in audio samples
+Medium
+Use audio separation tool (Demucs) to isolate voice
+Hinglish TTS mispronunciation
+Medium
+Add pronunciation guide in ElevenLabs settings
+API costs at scale
+Low
+Cache generated scripts; batch audio generation
+
+12. Open Questions
+Where does the final output live? Web app, mobile app, or internal tool?
+Who reviews scripts before audio generation? Kiran himself or team?
+How many reels per week is the target output?
+Will other doctors be added in Phase 4? If yes, same voice clone approach?
+What platform for hosting? Antigravity, custom server, or Vercel?
+
+PRD v1.0 — Automated Reel Production System — Dr. Kiran  ·  Confidential
+
