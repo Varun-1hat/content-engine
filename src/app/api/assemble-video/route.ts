@@ -79,7 +79,7 @@ export async function POST(req: Request) {
                 const base64Prompt = Buffer.from(b.veo_prompt || b.prompt || "").toString('base64');
                 const base64Neg = Buffer.from(b.negative_prompt || "").toString('base64');
                 
-                const cmd = `python "${scriptPath}" "${base64Prompt}" "${base64Neg}" "${brollPath}" --base64`;
+                const cmd = `python3 "${scriptPath}" "${base64Prompt}" "${base64Neg}" "${brollPath}" --base64`;
                 
                 await execAsync(cmd);
                 

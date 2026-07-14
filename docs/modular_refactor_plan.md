@@ -1,27 +1,27 @@
-# Modular Pipeline Refactor — Audit & Plan
+# Modular Pipeline Refactor — Final Spec
 
-Grounded in the actual code (audited 2026-07-14), not the abstract framework. This doc is the sequel to that framework: real file/line references, real bugs, concrete phased steps.
+Grounded in the actual code (audited 2026-07-14). §0–3 = the audit (what exists, what's broken, what varies per client). §4+ = the frozen design. **Design freeze note:** after running the two migrations in §5, the schema does not get restructured again — every anticipated axis of variation (vendor, model, language, tier, content shape, avatar count, template set) has a home. Future needs can only *add* columns/tables, which is non-breaking; nothing existing gets reshaped.
 
 ---
 
 ## 0. Fix now (unrelated to the refactor, found during audit)
 
-| # | Issue | Where | Fix |
+| # | Issue | Where | Status |
 |---|-------|-------|-----|
-| 1 | **Live Gemini API key hardcoded as fallback**, committed in the initial commit. `load_env()` only reads a `.env.local` file, never `os.environ` — so on Render (env vars injected as real process env, no `.env.local` file exists) this fallback was likely **the key actually in use in production**, not a dead edge case. | `src/lib/veo_generator.py:23`, `src/lib/imagen_generator.py:22` | **Done** — patched both to read `os.environ` first, hard-fail with a clear error if unset. **You still need to:** rotate/revoke this key in Google AI Studio / Cloud Console now, and set `GEMINI_API_KEY` in Render's env vars if it isn't already. |
-| 2 | `exec("python ...")` calls a binary the Docker image never installs — Dockerfile only installs `python3`/`python3-pip`, no `python`→`python3` symlink. Errors are caught per-clip and logged, not thrown, so the request still "succeeds" with an avatar-only video and silently zero B-roll. | `src/app/api/assemble-video/route.ts:82`, `Dockerfile:4` | Change `python` → `python3` in the exec command (one word). Worth testing one real render against the Render deployment to confirm B-roll has actually been landing. |
-| 3 | `.venv` (3,897 files) is committed to git — not in `.gitignore`. | repo root | Add `.venv/` to `.gitignore`, `git rm -r --cached .venv`. Bloats every clone; not urgent, just cleanup. |
-| 4 | `revise-script` hardcodes "Dr. Kiran" by name and a **different emotion-tag vocabulary** (`[urgent],[pause],[slow],[warm],[emphasis]`) than the one the generation prompt actually teaches (`[excited_surprised],[serious],[concerned],[urgent],[informative],[reassuring],[instructive],[neutral]`). Revisions can inject tags the rest of the pipeline doesn't recognize. | `src/app/api/revise-script/route.ts:15,26` vs `src/lib/masterPrompt.ts:21-29` | Fold into Phase 2 (script adapter) — same root cause as everything else in §2.3. |
-| 5 | `STRATEGY_DUMP` (past-published-content list, explicitly meant to "avoid repeating") is imported into the UI but never referenced again — never reaches any prompt. | `src/app/page.tsx:6` | Dead import. Either wire it into the topic-generation prompt (real value: stops repeat topics) or delete it. Your call — flagged, not fixed. |
-| 6 | `@runwayml/sdk` and `@anthropic-ai/sdk` are dependencies with zero imports anywhere in `src/`. | `package.json:12,14` | Confirm intentional (future integration) or drop. |
+| 1 | **Live Gemini API key hardcoded as fallback**, and `load_env()` only read `.env.local`, never `os.environ` — on Render this fallback was likely the key actually in use. | `src/lib/veo_generator.py:23`, `src/lib/imagen_generator.py:22` | **Fixed** — both read `os.environ` first, hard-fail if unset. Key rotation on Google's side: on you. |
+| 2 | `exec("python ...")` but the Docker image only installs `python3` — B-roll generation fails silently in prod (per-clip errors are swallowed), leaving avatar-only videos. | `src/app/api/assemble-video/route.ts:82`, `Dockerfile:4` | **Fixed** — `python3`. Verify with one real render after deploy. |
+| 3 | `.venv` (3,897 files) committed to git. | repo root | **Fixed** — untracked, gitignored. |
+| 4 | `revise-script` hardcodes "Dr. Kiran" and a **different emotion-tag vocabulary** than the generation prompt teaches. | `src/app/api/revise-script/route.ts:15,26` vs `masterPrompt.ts:21-29` | Fixed by design in §4.4 (revise uses the client's voice prompt as system context). |
+| 5 | `STRATEGY_DUMP` (past-content "avoid repeating" list) imported but never reaches any prompt. | `src/app/page.tsx:6` | Fixed by design — `kb_past_content_path` column + prompt wiring in §4.4 (generate-topic). |
+| 6 | `@runwayml/sdk` and `@anthropic-ai/sdk` dependencies with zero imports. | `package.json` | **Open — your call**: drop or keep for planned integrations. |
 
 ---
 
 ## 1. Problem statement
 
-Single-tenant app hardcoded to one client (Dr. Kiran), built as a POC that's now in production. Every "brain" (strategy doc, voice persona, B-roll style guide, avatar options) is a TS constant or hardcoded path, not data. No `client_id` exists anywhere in the schema or code. Two params the UI already collects (`brollFrequency`, `editorInstructions`) never reach any API call — confirmed at the exact fetch call sites, not just observed as a symptom.
+Single-tenant app hardcoded to one client (Dr. Kiran), built as a POC that's now in production. Every "brain" (strategy doc, voice persona, B-roll style guide, avatar options) is a TS constant or hardcoded path, not data. No `client_id` exists anywhere. Two params the UI collects (`brollFrequency`, `editorInstructions`) never reach any API call.
 
-Conclusion from the audit (matches the earlier framework call): **refactor, not rewrite**. The vendor-integration logic (Gemini/ElevenLabs/HeyGen/Veo/FFmpeg) is correct and battle-tested. What's missing is one layer: config-per-client instead of hardcoded-per-Kiran.
+Conclusion: **refactor, not rewrite**. The vendor-integration logic (Gemini/ElevenLabs/HeyGen/Veo/FFmpeg) is correct and battle-tested. What's missing is one layer: config-per-client instead of hardcoded-per-Kiran.
 
 ---
 
@@ -31,175 +31,216 @@ Conclusion from the audit (matches the earlier framework call): **refactor, not 
 
 | Value | Classification | Location |
 |---|---|---|
-| `RESEARCH_DOC` (IG algorithm strategy + 7 reel templates + hook/close rules) | **Business-variable** — 100% Kiran/pediatric-vertical content | `src/lib/researchDoc.ts` (imported by 2 routes) |
-| `MASTER_PROMPT` (persona, Hinglish rules, ElevenLabs emotion-tag vocabulary, script structure timing) | **Business-variable** — the single highest-value thing to extract; this *is* the client's voice | `src/lib/masterPrompt.ts` |
-| "current month/season in **India**" framing | **Business-variable** → becomes `locale.region` | `generate-topic/route.ts:11,16` |
-| Word-count-from-duration heuristic (2.5 words/sec) | Infra-static logic, but the *rate* is language-dependent — should be a config number, not a literal | `generate-english/route.ts:16` |
-| JSON output schema (topic/template/hookType/wordCount/etc.) | Infra-static — reusable shape | `masterPrompt.ts:63-73` |
-| Retry (3x/1s), 503→`gemini-1.5-pro` fallback, JSON-fence stripping | Infra-static **but duplicated 4 times with drift** — `revise-script` has *none* of this (no retry, no fallback) | all 4 routes, see §3 |
-| Model name (`gemini-2.5-flash`, was `-pro` until an uncommitted change today) | **Business/tier-variable** — should be a config knob, not a literal repeated 5x | all 4 routes |
+| `RESEARCH_DOC` (IG strategy + 7 templates + hook/close rules) | **Business-variable** | `src/lib/researchDoc.ts` |
+| **Topic-selection decision tree** (4-step analysis naming Kiran's 7 templates) | **Business-variable — but hardcoded in the route prompt, not the research doc.** Caught in the final design pass; now merged into the KB doc (seed-kb research_doc.md PART 3) so the route can be generic. | `generate-topic/route.ts:19-48` |
+| `MASTER_PROMPT` (persona, Hinglish rules, emotion-tag vocabulary) | **Business-variable** — this *is* the client's voice | `src/lib/masterPrompt.ts` |
+| "current month/season in **India**" framing | **Business-variable** → `locale_region` | `generate-topic/route.ts:11,16` |
+| Words-per-second heuristic (2.5) | Rate is language-dependent → `speech_words_per_sec` column | `generate-english/route.ts:16` |
+| JSON output schemas (topic list, script object) | **Infra-static** — these are the API contracts between stages; they stay in code | routes |
+| Retry/fallback/JSON-fence stripping | Infra-static **but duplicated 4 ways with drift** (see §3) | all routes |
+| Model names | **Business/tier-variable** → `model_script` / `model_structured` / `model_fallback` columns | all routes |
 
 ### 2.2 Stage 3: Production setup (UI only — `page.tsx`)
 
 | Value | Classification |
 |---|---|
-| `EXCEL_TEMPLATES` (7 template names), `TEMPLATE_PREVIEWS` (hardcoded video URLs + descriptions) | **Business-variable** — Kiran-specific content baked into the component (lines 30-38, 68-97) |
-| `AVATARS = ["Casual","Scrub","Formal","Studio"]` | **Business-variable** — a brand-ambassador client has exactly 1 avatar, not 4 named looks |
-| `brollFrequency`, `editorInstructions` state | Captured, shown back to the user, **never sent** to `/api/generate-audio` (line 183) or `/api/generate-broll-plan` (line 219) — confirmed gap |
-| `globalSpeed` slider | UI hidden (commented out, lines 610-628) but state still wired at 1.0 default — dead UI, live plumbing |
+| `EXCEL_TEMPLATES` + `TEMPLATE_PREVIEWS` (names, descriptions, sample videos) | **Business-variable** → `client_templates` table |
+| `AVATARS` array + `/casual.png`-style images | **Business-variable** → `client_avatars` table (with `preview_image_url`) |
+| `brollFrequency`, `editorInstructions` | Captured, never sent → become per-job fields, wired to the B-roll plan route |
+| `globalSpeed` | Hidden UI, live plumbing → per-job field, keep |
 
 ### 2.3 Stage 4: Audio (`generate-audio/route.ts`)
 
 | Value | Classification |
 |---|---|
-| Header/bracket-stripping regex, sentence-boundary timestamp parser, FFmpeg `atempo`+`loudnorm` pipeline, Cloudinary upload | **Infra-static** — fully reusable as-is, vendor-agnostic once ElevenLabs call is wrapped |
-| `ELEVENLABS_VOICE_ID` (env var) | Already half-externalized — good instinct, wrong shape for multi-tenant (one global env var can't hold N clients' voice IDs) |
-| `model_id: 'eleven_v3'`, `stability: 0.5`, `loudnorm=I=-16` | **Business-variable** — reasonable defaults, should be per-client overrides |
-| Cloudinary folder `"dr_kiran_audio"` | **Business-variable** → `${client_id}/audio` |
+| Header/bracket stripping, timestamp parsing, FFmpeg `atempo`+`loudnorm`, Cloudinary upload | **Infra-static** — shared pipeline code |
+| `ELEVENLABS_VOICE_ID` env var | → `voice_id` column |
+| `eleven_v3`, `stability: 0.5` | → `voice_model_id`, `voice_stability` columns |
+| `loudnorm=I=-16` | Infra-static (social-media loudness standard); `extra` covers exceptions |
+| Folder `"dr_kiran_audio"` | → `${storage_folder_prefix}/audio` |
 
 ### 2.4 Stage 5: Avatar + B-roll plan
 
 | Value | Classification |
 |---|---|
-| 4-key avatar lookup (`HEYGEN_AVATAR_ID_CASUAL/SCRUB/FORMAL/STUDIO`) | **Business-variable** — models "avatar looks" as Kiran-specific env vars; won't scale past client #2 without proliferating env vars per client | `generate-avatar/route.ts:14-19` |
-| HeyGen call shape, polling (5s × 60), 1080×1920, `avatar_style/version` | **Infra-static** — this stage is already the closest thing to a clean adapter in the codebase |
-| `dr_kiran_creative_director_promptv2.md` (Indian skin-tone rules, jhabla/onesie clothing, Mumbai settings, katori/Krishna-idol props, B-roll timing rules) | **Business-variable** — entire file is Kiran/pediatric-vertical visual style, loaded via a hardcoded `path.join` | `generate-broll-plan/route.ts:17` |
-| `brollFrequency`/`editorInstructions` | **Confirmed never in the request body** — route destructures only `script, audioUrl, avatarVideoUrl, timestamps` (line 10); frontend never sends them (page.tsx:219-224) |
+| `HEYGEN_AVATAR_ID_*` env-var map | → `client_avatars` rows; browser sends the **label**, server resolves to `avatar_id` (IDs never ship to the client) |
+| HeyGen call shape, polling, 1080×1920 | **Infra-static** (9:16 is the product) |
+| `dr_kiran_creative_director_promptv2.md` (Indian-specific visual rules) | **Business-variable** → `kb_creative_director_prompt_path`. The Indian-specific negative-prompt *example* embedded in the route's JSON-format instruction moves into the KB doc too; the route keeps only the generic format contract. |
+| `brollFrequency`/`editorInstructions` | Wired in as prompt context (finally) |
 
-### 2.5 Stage 6: Assembly (`assemble-video/route.ts`, `veo_generator.py`, `imagen_generator.py`)
+### 2.5 Stage 6: Assembly (`assemble-video/route.ts`, python generators)
 
 | Value | Classification |
 |---|---|
-| FFmpeg complex-filter construction (setpts/scale/crop/overlay), parallel `Promise.all` generation, Cloudinary upload, temp-dir cleanup | **Infra-static** — generic, reusable regardless of vendor |
-| `scriptFile = imagen_generator.py \| veo_generator.py` branch | This *is* the vendor-swap point already — cleanly isolated, smallest lift in the whole codebase to add a 3rd engine (Kling/Runway) |
-| Cloudinary folder `"dr_kiran_assembled"` | **Business-variable** → `${client_id}/assembled` |
+| FFmpeg overlay construction, parallel generation, temp handling | **Infra-static** |
+| `veo_generator.py` / `imagen_generator.py` branch | Already the vendor-swap point → formalized as the visual adapter |
+| Folder `"dr_kiran_assembled"` | → `${storage_folder_prefix}/assembled` |
 
 ### 2.6 Persistence (`save-script/route.ts`)
 
-Generic Supabase insert, but table `scripts` has no `client_id` column and isn't called from the UI at all. This is the literal seed of the jobs table in §4.3 — needs to grow into that, not just get wired up as-is.
+Unwired route inserting into a `scripts` table with no `client_id`. **Deleted in this design** — replaced by the `jobs` table (§4.2), which is the `Reel` record from `public/little_fern_reel_engine_flow.md` implemented literally.
 
 ---
 
-## 3. Cross-cutting pattern: the Gemini call is copy-pasted 4 different ways
+## 3. Cross-cutting: the Gemini call is copy-pasted 4 different ways
 
 | Route | Retries | 503 fallback | JSON mode | Extraction regex |
 |---|---|---|---|---|
-| `generate-topic` | 3x/1s | no | native `responseMimeType` | `\[[\s\S]*\]` |
-| `generate-english` | none | → `gemini-1.5-pro` | no | `\{[\s\S]*\}` |
-| `generate-hinglish` | none | → `gemini-1.5-pro` | no | `\{[\s\S]*\}` |
-| `generate-broll-plan` | none | no | native `responseMimeType` | none (trusts native mode) |
+| `generate-topic` | 3x/1s | no | native | `\[[\s\S]*\]` |
+| `generate-english` | none | → 1.5-pro | no | `\{[\s\S]*\}` |
+| `generate-hinglish` | none | → 1.5-pro | no | `\{[\s\S]*\}` |
+| `generate-broll-plan` | none | no | native | none |
 | `revise-script` | **none** | **none** | no | none |
 
-Four variants of the same thing, one with zero resilience. This is the clearest single extraction target — see Phase 2.
+One adapter replaces all five variants with: retry(3) → fallback-model → native JSON mode where structured → single extraction path.
 
-Also inconsistent: two KB documents live as TS constants (`researchDoc.ts`, `masterPrompt.ts`), one lives as a markdown file read from disk at request time (`dr_kiran_creative_director_promptv2.md`). All three need to end up config content loaded the same way, by `client_id`.
+**The clean split, as a rule:** *structural output contracts (JSON schemas between stages) live in code; content, persona, style, and selection rules live in KB docs; settings and IDs live in DB columns; secrets live in env vars.* Every piece of the system falls into exactly one of those four buckets.
 
 ---
 
-## 4. Target architecture (refined from the framework doc using the real audit)
+## 4. Final design
 
-### 4.1 Client config
+### 4.1 Schema — `supabase/migrations/0001_init.sql` (single migration, run once)
 
-Recommend **Supabase table**, not a JSON file in the repo — `public/little_fern_reel_engine_flow.md:24` already states the requirement explicitly: *"editable config so Kiran/Pari can tune prompts without a code change."* A repo file still needs a deploy; a DB row (or DB row + Supabase Storage for the long prose docs) doesn't.
-
-```
-clients
-  id            text primary key   -- "kiran"
-  content_type  text               -- talking_head | product_visual
-  tier          text               -- scenario_premium | full_production | avatar_only | audio_only | script_only
-  script_mode   text               -- generate | polish
-  active        boolean
-  config        jsonb              -- everything below
-```
-
-`config` shape (fields marked ← are the ones this audit found hardcoded and traced to a real file/line above):
-
-```json
-{
-  "locale": { "language": "hinglish", "region": "IN" },
-  "knowledge_base": {
-    "strategy_doc": "kb/kiran/research_doc.md",       // ← researchDoc.ts
-    "voice_prompt": "kb/kiran/master_prompt.md",       // ← masterPrompt.ts
-    "creative_director_prompt": "kb/kiran/creative_director.md", // ← dr_kiran_creative_director_promptv2.md
-    "past_content": "kb/kiran/strategy_dump.json"      // ← strategyDump.ts (currently dead)
-  },
-  "templates": [ /* the 7 template defs, currently prose inside researchDoc.ts */ ],
-  "voice": { "provider": "elevenlabs", "voice_id": "...", "model_id": "eleven_v3", "stability": 0.5 },
-  "avatars": [ { "label": "Casual", "avatar_id": "..." }, { "label": "Scrub", "avatar_id": "..." } ],
-  "visuals": { "provider": "veo_imagen", "style_preset": "indian_pediatric_v2" },
-  "models": { "script": "gemini-2.5-pro", "structured": "gemini-2.5-flash" },
-  "storage": { "provider": "cloudinary", "folder_prefix": "kiran" }
-}
-```
-
-`avatars` as an array (not 4 fixed env-var slots) covers Kiran (4 looks), a brand client (exactly 1, created once), and a product-visual client (0 — skip the stage).
-
-### 4.2 Adapters (interfaces, not vendors)
-
-| Adapter | Signature | Replaces |
-|---|---|---|
-| `adapters/script/gemini.ts` | `generate(system, user, {model, jsonMode, retries, fallbackModel}) → string` | the 4 duplicated blocks in §3, including giving `revise-script` the resilience it currently lacks |
-| `adapters/voice/elevenlabs.ts` | `synthesize(text, {voiceId, stability, modelId}) → {audioBase64, alignment}` | ElevenLabs fetch in `generate-audio` (ffmpeg/timestamp-parsing stay as shared pipeline code — not vendor-specific) |
-| `adapters/avatar/heygen.ts` | `render({avatarId, audioUrl, dimension}) → videoUrl` (polls internally) | `generate-avatar/route.ts` body |
-| `adapters/visual/veo_imagen.ts` | `plan(...) → clips[]`, `generateClip(clip) → localPath` | python-spawn logic in `assemble-video/route.ts` (fixes the `python3` bug in one place instead of two scripts) |
-| `adapters/storage/cloudinary.ts` | `upload(buffer, {folder, resourceType}) → url` | 3 duplicated `cloudinary.uploader.upload_stream` blocks |
-
-Each route shrinks to: load client config → call adapter → return. Swapping HeyGen→Higgsfield or Veo→Kling means writing one new adapter file; zero route changes.
-
-### 4.3 Jobs table
-
-`public/little_fern_reel_engine_flow.md:28-44` already specs this almost exactly (the `Reel` record) — Phase 3 is mostly *implementing an existing spec*, not new design:
+Four tables. Full DDL in the migration file; shape:
 
 ```
-jobs
-  id, client_id, status,
-  topic, template, target_duration,
-  english_script, full_script, script_version,
-  broll_frequency, editor_notes,        -- ← finally has somewhere to go
-  audio_url, timestamps_json,
-  avatar_video_url, avatar_look,
-  broll_plan_json,
-  final_video_url,
+clients            -- one row per client; every setting a real column (Studio row editor = admin panel)
+  id, display_name, content_type, script_mode, tier, active
+  locale_language, locale_region, speech_words_per_sec
+  kb_research_doc_path, kb_voice_prompt_path, kb_creative_director_prompt_path, kb_past_content_path
+  script_provider, model_script, model_structured, model_fallback
+  voice_provider, voice_id, voice_model_id, voice_stability
+  avatar_provider
+  visual_provider, visual_style_preset
+  storage_provider, storage_folder_prefix
+  extra jsonb        -- escape hatch for one-offs ONLY; promote repeated settings to real columns
   created_at, updated_at
+
+client_avatars     -- 0..N looks per client (0 = skip avatar stage; 1 = brand ambassador; N = wardrobe)
+  id, client_id fk, label, avatar_id, preview_image_url, sort_order   [unique (client_id, label)]
+
+client_templates   -- the reel formats the UI offers for this client
+  id, client_id fk, label, description, preview_video_url, sort_order [unique (client_id, label)]
+                   -- labels must match template names in the client's research doc (AI matches by name)
+
+jobs               -- one row per reel; the `Reel` record from little_fern_reel_engine_flow.md
+  id, client_id fk, status (draft→script_ready→audio_ready→rendering→assets_ready→assembling→done|failed)
+  topic, template, target_duration_sec, english_script, full_script, script_meta jsonb
+  avatar_label, broll_frequency, editor_notes, speech_speed      -- per-JOB choices, not per-client
+  audio_url, audio_timestamps jsonb, avatar_video_url, broll_plan jsonb, final_video_url, error
 ```
 
----
+jsonb appears only for **machine-written artifacts** (timestamps, B-roll plans, script metadata) — never for anything a human edits by hand. RLS enabled on all four tables with zero policies: the publishable key can touch nothing; all access is server-side via the secret key.
 
-## 5. Phased plan
+**Why `jobs` now** even though persistence is the last implementation step: creating it costs nothing and means the schema never changes shape again — every remaining step is code-only.
 
-**Phase 1 — Client model** (do first; nothing else can start without a `client_id`)
-1. Create `clients` table in Supabase.
-2. Move `researchDoc.ts` / `masterPrompt.ts` / `dr_kiran_creative_director_promptv2.md` content to Supabase Storage under `kb/kiran/*`, referenced by the config's `knowledge_base` paths.
-3. `src/lib/clients/loadConfig.ts` — `loadClientConfig(clientId)`, fetches row + KB content.
-4. Thread `client_id` through every route (request body gains it; route loads config instead of importing the hardcoded constant).
-5. UI: replace the single "Log In as Dr. Kiran" button with a client picker (or `?client=` param); swap `EXCEL_TEMPLATES`/`AVATARS`/`TEMPLATE_PREVIEWS` for `config.templates`/`config.avatars`.
+### 4.2 Storage
 
-**Phase 2 — Adapters**
-Mechanical, one file at a time, per §4.2. Fixes the `revise-script` resilience gap and the tag-vocabulary mismatch (finding #4) as a side effect, since the adapter pulls the tag vocabulary from the same config the generation step uses.
+Bucket `client-kb` (private). Per client: `<client_id>/research_doc.md`, `voice_prompt.md`, `creative_director_prompt.md`, optional `past_content.md`. Referenced by the `kb_*_path` columns.
 
-**Phase 3 — Jobs table**
-Per §4.3. Wire a row-per-stage-transition instead of React-state-only. Add `GET /api/jobs/[id]` for a status view — not a full admin UI.
+**Single source of truth rule:** Supabase Storage is the *only* runtime source. `supabase/seed-kb/` in the repo is onboarding seed material (initial upload + versioned backup), never read by the app.
 
-Sizing (solo dev, relative not hours): Phase 1 = M, Phase 2 = M (mechanical but touches every route), Phase 3 = S.
+Kiran's seed files (extracted programmatically from the live TS constants — byte-identical):
+- `research_doc.md` — now includes PART 3 (topic-selection decision tree, moved out of the route)
+- `voice_prompt.md`, `creative_director_prompt.md`
 
----
+### 4.3 Code layout
 
-## 6. Onboarding (post-Phase-1)
+```
+src/lib/
+  clients/
+    types.ts            ✅ ClientConfig / ResolvedClient / ClientAvatar / ClientTemplate
+    loadConfig.ts       ✅ loadClientConfig(id) → row + avatars + templates + KB docs; 60s cache
+  adapters/
+    script/   gemini.ts + index.ts      generate({system, prompt, model, fallbackModel, json}) → text
+    voice/    elevenlabs.ts + index.ts  synthesize(text, {voiceId, modelId, stability}) → {audioBase64, alignment}
+    avatar/   heygen.ts + index.ts      render({avatarId, audioUrl}) → videoUrl   (polls internally)
+    visual/   veo_imagen.ts + index.ts  generateClip({prompt, negativePrompt, mediaType, outPath}) → localPath
+    storage/  cloudinary.ts + index.ts  upload(buffer, {folder, resourceType}) → url
+  pipeline/
+    audio.ts            text preprocessing + timestamp parsing + ffmpeg normalize (shared, vendor-free)
+    assembly.ts         ffmpeg overlay/stitch logic (shared, vendor-free)
+```
 
-1. Insert a row into `clients` via Supabase Studio — no custom admin panel.
-2. Upload KB docs to Supabase Storage under `kb/<client_id>/`.
-3. Create voice_id (ElevenLabs) + avatar_id(s) (HeyGen) outside the pipeline; paste into config.
-4. One script + one full video through `?client=<id>`, sign-off.
-5. Go live.
+Each `index.ts` exports `get<Kind>Adapter(provider)` — a lookup keyed by the client's `*_provider` column. New vendor = one new file + one map entry; zero route changes. The Python generators stay (invoked by the visual adapter via `python3`).
 
-No code changes per client once Phase 1 lands — only Phase 2 (new vendor) or a genuinely new content shape (`product_visual`) touches code again.
+### 4.4 Per-route changes (the complete list)
 
----
+Every route gains `clientId` (body for POSTs, `?client=` for GETs) and starts with `const c = await loadClientConfig(clientId)`.
 
-## 7. Open decisions
+| Route | Changes |
+|---|---|
+| `generate-topic` | Prompt = `c.researchDoc` (which now contains the decision tree) + generic task/format block. Region/season from `c.locale`. If `c.pastContent` non-empty, append "PREVIOUSLY PUBLISHED — avoid repeating: …". Model `c.script.structuredModel` via script adapter. |
+| `generate-english` | Prompt = `c.researchDoc` + generic task block. Word count = `duration × c.speechWordsPerSec`. Model `c.script.model`, fallback `c.script.fallbackModel`. |
+| `generate-hinglish` | Prompt = `c.voicePrompt` + generic task block. Model `c.script.model`. (Route name is legacy — it's the "voice-adaptation" step; rename to `adapt-voice` optional, low priority.) |
+| `revise-script` | System = `c.voicePrompt` (fixes finding #4: persona + tag vocabulary now always match generation). Model `c.script.model` via adapter (gains retry/fallback for free). |
+| `generate-audio` | Voice adapter with `c.voice.*`. Upload folder `${c.storage.folderPrefix}/audio`. Shared pipeline code (`pipeline/audio.ts`) unchanged in behavior. |
+| `generate-avatar` | Body sends `avatarLabel`; server resolves via `c.avatars` (label→`avatar_id`). Avatar adapter chosen by `c.avatarProvider`. |
+| `generate-broll-plan` | System = `c.creativeDirectorPrompt` + generic JSON-format contract (Indian-specific example text moved into the KB doc). Body gains `brollFrequency` + `editorNotes`, appended as creative guidance. Model `c.script.structuredModel`. |
+| `assemble-video` | Visual adapter chosen by `c.visual.provider`. Upload folder `${c.storage.folderPrefix}/assembled`. |
+| `save-script` | **Delete.** Replaced by `jobs` routes in step F. |
+| **New:** `GET /api/clients` | List `{id, display_name}` of active clients — powers the picker. |
+| **New:** `GET /api/clients/[id]/ui-config` | Safe UI subset: display name, tier, content type, templates (label/description/preview), avatars (label/preview only — **vendor IDs never ship to the browser**), default duration bounds. |
+| **New (step F):** `POST /api/jobs`, `PATCH /api/jobs/[id]`, `GET /api/jobs?client=` | Thin CRUD over `jobs`; each UI stage transition persists its artifacts. |
 
-| Decision | Recommendation | Why it's not just decided for you |
+### 4.5 UI (`page.tsx`)
+
+1. Fake login screen → **client picker** (from `/api/clients`; selection also readable from `?client=` for direct links).
+2. `EXCEL_TEMPLATES`, `TEMPLATE_PREVIEWS`, `AVATARS` deleted → rendered from `/api/clients/[id]/ui-config`.
+3. Every fetch adds `clientId`; avatar step sends `avatarLabel`; architect step finally sends `brollFrequency` + `editorInstructions` to the B-roll plan call.
+4. Tier-awareness: steps render conditionally (`audio_only` stops after stage 4; `product_visual` skips avatar) — simple conditionals on `tier`/`contentType`, not a rearchitecture.
+5. Step F: stage transitions write to `jobs` so work survives refresh (resume = load job by id).
+
+### 4.6 Env vars — final state
+
+| Stays in env (secrets) | Moves to DB (was env) | Gone |
 |---|---|---|
-| Repo B strategy: new git branch vs. literal separate repo/Render service | Branch — git already gives "safe to abandon," a second repo adds deploy/drift overhead for a solo dev | Depends on whether Render is auto-deploying `main` right now; if so a branch alone doesn't give you a safe staging URL to test against |
-| KB storage: Supabase Storage vs. repo files under `kb/` | Supabase Storage | Repo files are simpler for a solo dev today but reintroduce "prompt tuning needs a deploy," which `little_fern_reel_engine_flow.md` explicitly calls out as something to avoid |
-| Fix `python`→`python3` now vs. bundle into Phase 2 | Now — one word, zero risk, independent of everything else | — |
+| `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, `HEYGEN_API_KEY`, `CLOUDINARY_*`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` | `ELEVENLABS_VOICE_ID` → `clients.voice_id` · `HEYGEN_AVATAR_ID_*` → `client_avatars` | `NEXT_PUBLIC_HEYGEN_AVATAR_ID`, `HEYGEN_AVATAR_ID` fallbacks |
+
+### 4.7 Deletions (final step, after nothing imports them)
+
+`src/lib/researchDoc.ts`, `masterPrompt.ts`, `strategyDump.ts` · `public/dr_kiran_creative_director_promptv2.md` · `src/app/api/save-script/` · root `strategy_dump.json`, `parse_excel.js`, `Dr_Kiran_IG_Strategy.xlsx` (after optionally distilling its published-topics list into `kiran/past_content.md`) · `xlsx` dependency · (your call: `@runwayml/sdk`, `@anthropic-ai/sdk`).
+
+---
+
+## 5. Execution order
+
+Phases 1+2 from the earlier draft are **merged per-route**: each route gets config-loading *and* adapter extraction in one pass, so every route is touched once, not twice. The app keeps working for Kiran after every single step.
+
+| Step | What | Who |
+|---|---|---|
+| **A** | Run `0001_init.sql`, fill 5 placeholders in `0002_seed_kiran.sql`, run it. Upload the 3 (or 4) KB docs from `supabase/seed-kb/kiran/` to the `client-kb` bucket (bucket may already exist from the earlier attempt — the files are unchanged except `research_doc.md`, **re-upload that one**; it gained PART 3). | **You** |
+| **B** | Build adapters + `pipeline/` modules + the two new client routes. No existing route touched yet. | Code |
+| **C** | Migrate routes one at a time, verifying against Kiran after each: topic → english → hinglish → revise → audio → avatar → broll-plan → assemble. | Code |
+| **D** | `page.tsx`: picker, config-driven UI, wire the dropped params, tier conditionals. | Code |
+| **E** | Deletions (§4.7). End-to-end test: one full reel for Kiran. | Code |
+| **F** | Jobs persistence: CRUD routes + stage-transition writes + resume-by-id. (Table already exists — code-only.) | Code |
+
+After **A**, the schema is frozen. B–F are code; each is independently verifiable.
+
+---
+
+## 6. Onboarding a new client (the runbook this was all for)
+
+1. **Studio → clients**: insert row — all plain fields. Pick tier/content_type; set `storage_folder_prefix`.
+2. **Studio → client_avatars / client_templates**: insert rows (0 avatars is valid for product-visual).
+3. **Storage → client-kb/<id>/**: upload the client's 3 KB docs (start from Kiran's as skeletons; template names in `research_doc.md` must match the `client_templates` labels).
+4. External one-time setup: ElevenLabs voice (license/clone) → `voice_id`; HeyGen avatar(s) → `client_avatars.avatar_id`; consent sign-off where applicable.
+5. Open app → pick client → run one script + one full video → client sign-off → live.
+
+No code. Editing an existing client = editing a cell in Studio (≤60s to take effect, per the config cache TTL).
+
+---
+
+## 7. Explicitly deferred (decided *against* for now — not gaps)
+
+| Item | Why deferred | Cost when needed |
+|---|---|---|
+| Decomposing the 7 templates into structured rows (rules as columns) | Templates-as-prose works today; decomposition is a prompt-engineering project, not a schema one | Additive table |
+| Per-client vendor API keys (client-billed accounts) | Secrets don't belong in the DB; all clients bill through your accounts today | Additive column naming an env var (`voice_api_key_env`) |
+| Aspect ratios other than 9:16 (e.g. 16:9 ad cuts) | Every current client is reels; 9:16 is the product | Additive `jobs.aspect_ratio` column |
+| Cost-per-deliverable logging (tokens + vendor minutes) | Valuable for tier pricing, but measurement, not architecture | Additive `job_events`/cost table |
+| Admin panel | Studio row editor covers it at current scale — that's what the flattened columns bought | Pure frontend over existing tables |
+| Webhooks instead of polling (HeyGen/Veo) | Polling works at current volume; webhooks need a public callback URL + reconciliation | Adapter-internal change, invisible to routes |
+| RAG over KB docs | Docs are ~10KB each — full-prompt inclusion is fine; RAG matters when KBs are 100x this (chatbot territory, different pipeline family) | Separate concern |
