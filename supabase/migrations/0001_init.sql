@@ -41,7 +41,7 @@ create table clients (
   script_provider   text not null default 'gemini',
   model_script      text not null default 'gemini-2.5-flash',  -- creative writing (the quality knob)
   model_structured  text not null default 'gemini-2.5-flash',  -- JSON planning tasks (the cost knob)
-  model_fallback    text not null default 'gemini-1.5-pro',    -- used on 503s
+  model_fallback    text not null default 'gemini-flash-latest', -- stable alias; used when the primary model errors
 
   -- Voice (TTS)
   voice_provider    text not null default 'elevenlabs',

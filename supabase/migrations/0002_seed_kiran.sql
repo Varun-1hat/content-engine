@@ -22,7 +22,7 @@ insert into clients (
   'kiran/research_doc.md', 'kiran/voice_prompt.md', 'kiran/creative_director_prompt.md',
   -- model_script seeded as flash to match today's live behavior (your cost change);
   -- flip to gemini-2.5-pro in Studio anytime — it's a knob now, not a deploy.
-  'gemini', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro',
+  'gemini', 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-flash-latest',
   'elevenlabs', '<PASTE ELEVENLABS_VOICE_ID>', 'eleven_v3', 0.5,
   'heygen',
   'veo_imagen', 'indian_pediatric_v2',

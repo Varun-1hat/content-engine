@@ -1,58 +1,65 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { MASTER_PROMPT } from '@/lib/masterPrompt';
+import { loadClientConfig } from '@/lib/clients/loadConfig';
+import { requireUser, forbidClientMismatch } from '@/lib/auth';
+import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-
+// POST /api/generate-hinglish — the voice-adaptation stage ('adapt_voice').
+// Route name is legacy; the client's voice prompt (KB) defines the target
+// language/persona, which need not be Hinglish.
+// Body: { clientId, englishScript, topic?, jobId? }
 export async function POST(req: Request) {
+  let jobId: string | undefined;
   try {
-    const { englishScript, topic } = await req.json();
+    const body = await req.json();
+    const { clientId, englishScript, topic } = body;
+    jobId = body.jobId;
 
-    if (!englishScript) {
-      return NextResponse.json({ error: 'English Script is required' }, { status: 400 });
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    const auth = await requireUser();
+    if (auth instanceof NextResponse) return auth;
+    const forbidden = forbidClientMismatch(auth, clientId);
+    if (forbidden) return forbidden;
+    if (jobId) {
+      const jobForbidden = await jobClientMismatch(jobId, clientId);
+      if (jobForbidden) return jobForbidden;
     }
+    if (!englishScript) return NextResponse.json({ error: 'English Script is required' }, { status: 400 });
 
-    const geminiPrompt = `${MASTER_PROMPT}
-    
+    const c = await loadClientConfig(clientId);
+    if (jobId) await startStage(jobId, 'adapt_voice');
+
+    const prompt = `${c.voicePrompt}
+
 === TASK ===
-Adapt the following English script into Dr. Kiran's Hinglish style.
-Original Topic: "${topic}"
+Adapt the following English script into ${c.displayName}'s voice and style, following ALL rules above.
+Original Topic: "${topic || 'N/A'}"
 
 Base English Script:
 ${englishScript}
 
-Output strictly valid JSON only exactly matching the required output format (a single 'fullScript' string). Do not wrap in markdown \`\`\`json blocks.`;
+Output strictly valid JSON only, exactly matching the required output format defined above. Do not wrap in markdown blocks.`;
 
-    let response;
-    try {
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-      const result = await model.generateContent(geminiPrompt);
-      response = await result.response;
-    } catch (err: any) {
-      if (err.message?.includes('503')) {
-        console.warn('gemini-2.5-flash returned 503, falling back to gemini-1.5-pro...');
-        const fallbackModel = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-        const result = await fallbackModel.generateContent(geminiPrompt);
-        response = await result.response;
-      } else {
-        throw err;
-      }
-    }
-    
-    let text = response.text();
-    
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      text = match[0];
-    } else {
-      text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    }
-    
-    const finalScript = JSON.parse(text);
+    const raw = await getScriptAdapter(c.script.provider).generate({
+      prompt,
+      model: c.script.model,
+      fallbackModel: c.script.fallbackModel,
+      json: true,
+    });
+    const script = extractJson<Record<string, unknown> & { fullScript?: string }>(raw);
 
-    return NextResponse.json({ success: true, script: finalScript });
+    if (jobId) {
+      const { fullScript, ...meta } = script;
+      await completeStage(jobId, 'adapt_voice', {
+        full_script: fullScript ?? null,
+        script_meta: meta,
+      });
+    }
+
+    return NextResponse.json({ success: true, script });
   } catch (error: any) {
-    console.error('Error generating hinglish script:', error);
+    console.error('Error generating voice-adapted script:', error);
+    if (jobId) await failStage(jobId, 'adapt_voice', error).catch(() => {});
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
 }

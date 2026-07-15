@@ -49,4 +49,7 @@ warm indirect tube light (clinic)
 END every veo_prompt with:
 photorealistic documentary style, 9:16 vertical frame
 
+NEGATIVE PROMPT — every clip's "negative_prompt" must exclude Western/stock looks. Use this as the base and adapt to the scene:
+cartoon, CGI, 3D render, illustration, Western-looking baby, pale skin, blonde hair, blue eyes, studio lighting, ring light, bright white walls, IKEA-style furniture, stock photo aesthetic, watermark, text in frame, logo, distorted hands, extra fingers, hospital white room, smiling when context is serious
+
 Return ONLY a valid JSON array. No markdown. No explanation.

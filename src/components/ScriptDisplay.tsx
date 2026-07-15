@@ -3,6 +3,8 @@ import { Copy, Sparkles, Edit3, Loader2, Undo2, Redo2, Eye, EyeOff } from 'lucid
 import { diffWords } from 'diff';
 
 interface ScriptDisplayProps {
+  clientId: string;
+  jobId?: string | null;
   script: {
     topic: string;
     template: string;
@@ -16,7 +18,7 @@ interface ScriptDisplayProps {
   onScriptUpdate?: (newScriptText: string) => void;
 }
 
-export default function ScriptDisplay({ script, onScriptUpdate }: ScriptDisplayProps) {
+export default function ScriptDisplay({ clientId, jobId, script, onScriptUpdate }: ScriptDisplayProps) {
   const [history, setHistory] = useState<string[]>([script.fullScript || ""]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [editValue, setEditValue] = useState(script.fullScript || "");
@@ -82,7 +84,7 @@ export default function ScriptDisplay({ script, onScriptUpdate }: ScriptDisplayP
       const res = await fetch('/api/revise-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ script: editValue, prompt: promptText }),
+        body: JSON.stringify({ clientId, jobId, script: editValue, prompt: promptText }),
       });
       const data = await res.json();
       if (data.success) {

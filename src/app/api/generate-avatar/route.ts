@@ -1,103 +1,66 @@
 import { NextResponse } from 'next/server';
+import { loadClientConfig } from '@/lib/clients/loadConfig';
+import { requireUser, forbidClientMismatch } from '@/lib/auth';
+import { getAvatarAdapter } from '@/lib/adapters/avatar';
+import { startStage, completeStage, failStage, updateJob, jobClientMismatch } from '@/lib/jobs';
 
+// POST /api/generate-avatar — talking-head render ('avatar' stage).
+// The browser sends the LABEL; the server resolves it to the vendor avatar_id
+// via client_avatars. Vendor IDs never ship to the browser.
+// Body: { clientId, audioUrl, avatarLabel?, jobId? }
 export async function POST(req: Request) {
+  let jobId: string | undefined;
   try {
-    const { audioUrl, selectedAvatar } = await req.json();
+    const body = await req.json();
+    const { clientId, audioUrl, avatarLabel } = body;
+    jobId = body.jobId;
 
-    if (!audioUrl) {
-      return NextResponse.json({ error: 'Missing audioUrl' }, { status: 400 });
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    const auth = await requireUser();
+    if (auth instanceof NextResponse) return auth;
+    const forbidden = forbidClientMismatch(auth, clientId);
+    if (forbidden) return forbidden;
+    if (jobId) {
+      const jobForbidden = await jobClientMismatch(jobId, clientId);
+      if (jobForbidden) return jobForbidden;
+    }
+    if (!audioUrl) return NextResponse.json({ error: 'Missing audioUrl' }, { status: 400 });
+
+    const c = await loadClientConfig(clientId);
+
+    const avatar = (avatarLabel && c.avatars.find((a) => a.label === avatarLabel)) || c.avatars[0];
+    if (!avatar) {
+      return NextResponse.json(
+        { error: `Client "${c.id}" has no avatars configured (client_avatars is empty)` },
+        { status: 400 }
+      );
     }
 
-    const heygenApiKey = process.env.HEYGEN_API_KEY;
-    
-    // Map the selected string to specific environment variables
-    const avatarEnvMap: Record<string, string | undefined> = {
-      "Casual": process.env.HEYGEN_AVATAR_ID_CASUAL,
-      "Scrub": process.env.HEYGEN_AVATAR_ID_SCRUB,
-      "Formal": process.env.HEYGEN_AVATAR_ID_FORMAL,
-      "Studio": process.env.HEYGEN_AVATAR_ID_STUDIO,
-    };
+    if (jobId) await startStage(jobId, 'avatar');
 
-    // Use the specific ID if it exists, otherwise fallback to the default ID
-    const heygenAvatarId = (selectedAvatar ? avatarEnvMap[selectedAvatar] : null) 
-      || process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID 
-      || process.env.HEYGEN_AVATAR_ID;
-
-    if (!heygenApiKey || !heygenAvatarId) {
-      return NextResponse.json({ error: 'HeyGen API Key or Avatar ID missing' }, { status: 500 });
-    }
-
-    // Step 1: Submit generation request
-    const generateRes = await fetch('https://api.heygen.com/v2/video/generate', {
-      method: 'POST',
-      headers: {
-        'X-Api-Key': heygenApiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        video_inputs: [
-          {
-            character: {
-              type: 'avatar',
-              avatar_id: heygenAvatarId,
-              avatar_style: 'normal',
-              version: 'v4',
-            },
-            voice: {
-              type: 'audio',
-              audio_url: audioUrl,
-            },
-          },
-        ],
-        dimension: {
-          width: 1080,
-          height: 1920,
-        },
-      }),
+    const { videoUrl, providerJobId } = await getAvatarAdapter(c.avatarProvider).render({
+      avatarId: avatar.avatar_id,
+      audioUrl,
+      // Persist the vendor job id before polling starts so a crashed render
+      // can be reconciled from the jobs table.
+      onSubmitted: jobId
+        ? async (pid) => {
+            await updateJob(jobId!, { provider_job_ids: { [c.avatarProvider]: pid } });
+          }
+        : undefined,
     });
 
-    const generateData = await generateRes.json();
-    if (generateData.error || !generateData.data?.video_id) {
-      throw new Error(generateData.error?.message || 'Failed to submit HeyGen video generation');
-    }
-
-    const videoId = generateData.data.video_id;
-
-    // Step 2: Poll for completion (Wait up to ~5 mins)
-    let videoUrl = null;
-    let attempts = 0;
-    const maxAttempts = 60; // 60 * 5s = 5 minutes
-
-    while (attempts < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 5000)); // wait 5s
-
-      const statusRes = await fetch(`https://api.heygen.com/v1/video_status.get?video_id=${videoId}`, {
-        method: 'GET',
-        headers: {
-          'X-Api-Key': heygenApiKey,
-        },
+    if (jobId) {
+      await completeStage(jobId, 'avatar', {
+        avatar_video_url: videoUrl,
+        avatar_label: avatar.label,
       });
-
-      const statusData = await statusRes.json();
-      
-      if (statusData.data?.status === 'completed') {
-        videoUrl = statusData.data.video_url;
-        break;
-      } else if (statusData.data?.status === 'failed') {
-        throw new Error('HeyGen video generation failed');
-      }
-
-      attempts++;
     }
 
-    if (!videoUrl) {
-      throw new Error('HeyGen video generation timed out');
-    }
-
-    return NextResponse.json({ success: true, avatarVideoUrl: videoUrl });
-
+    return NextResponse.json({ success: true, avatarVideoUrl: videoUrl, providerJobId });
   } catch (error: any) {
-    console.error('HeyGen API Error:', error);
+    console.error('Avatar Render Error:', error);
+    if (jobId) await failStage(jobId, 'avatar', error).catch(() => {});
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

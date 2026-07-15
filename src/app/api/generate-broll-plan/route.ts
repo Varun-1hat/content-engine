@@ -1,32 +1,46 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import fs from 'fs';
-import path from 'path';
+import { loadClientConfig } from '@/lib/clients/loadConfig';
+import { requireUser, forbidClientMismatch } from '@/lib/auth';
+import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// POST /api/generate-broll-plan — creative-director timeline ('broll_plan' stage).
+// Visual style/timing rules come from the client's creative-director doc (KB);
+// this route owns only the JSON output contract.
+// Body: { clientId, script, timestamps?, brollFrequency?, editorNotes?, jobId? }
+
+const FREQUENCY_GUIDANCE: Record<string, string> = {
+  Minimal: 'Use B-roll sparingly — only the 2-3 most impactful moments. Let the avatar carry the video.',
+  Standard: 'Use balanced B-roll coverage following the timing rules.',
+  High: 'Cover as many qualifying moments with B-roll as the timing rules allow.',
+};
 
 export async function POST(req: Request) {
+  let jobId: string | undefined;
   try {
-    const { script, audioUrl, avatarVideoUrl, timestamps } = await req.json();
+    const body = await req.json();
+    const { clientId, script, timestamps, brollFrequency, editorNotes } = body;
+    jobId = body.jobId;
 
-    if (!script) {
-      return NextResponse.json({ error: 'Missing script' }, { status: 400 });
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    const auth = await requireUser();
+    if (auth instanceof NextResponse) return auth;
+    const forbidden = forbidClientMismatch(auth, clientId);
+    if (forbidden) return forbidden;
+    if (jobId) {
+      const jobForbidden = await jobClientMismatch(jobId, clientId);
+      if (jobForbidden) return jobForbidden;
     }
+    if (!script) return NextResponse.json({ error: 'Missing script' }, { status: 400 });
 
-    // Read the Creative Director prompt
-    const promptPath = path.join(process.cwd(), 'public', 'dr_kiran_creative_director_promptv2.md');
-    let systemInstruction = '';
-    try {
-      systemInstruction = fs.readFileSync(promptPath, 'utf-8');
-    } catch (e) {
-      console.warn("Could not find dr_kiran_creative_director_promptv2.md in public folder. Using default prompt.");
-      systemInstruction = "You are the Creative Director. Output the edit_timeline JSON.";
-    }
+    const c = await loadClientConfig(clientId);
+    if (jobId) await startStage(jobId, 'broll_plan');
 
-    // Add explicit JSON instructions to ensure parsability
-    systemInstruction += `
+    // Generic output contract — style rules (incl. negative-prompt content)
+    // live in the KB doc above this block.
+    const systemInstruction = `${c.creativeDirectorPrompt}
 
-CRITICAL INSTRUCTION: Your entire response must be a SINGLE valid JSON array. Do not include markdown code blocks, do not include the human-readable shot map, just pure JSON array.
+CRITICAL INSTRUCTION: Your entire response must be a SINGLE valid JSON array. Do not include markdown code blocks, do not include a human-readable shot map, just the pure JSON array.
 Use this format exactly:
 [
   {
@@ -35,47 +49,53 @@ Use this format exactly:
     "duration_seconds": 5,
     "media_type": "video",
     "scene": "plain English — what the shot shows",
-    "veo_prompt": "full Indian B-roll prompt goes here",
-    "negative_prompt": "cartoon, CGI, 3D render, illustration, Western-looking baby, pale skin, blonde hair, blue eyes, studio lighting, ring light, bright white walls, IKEA-style furniture, stock photo aesthetic, watermark, text in frame, logo, distorted hands, extra fingers, hospital white room, smiling when context is serious",
-    "caption_text": "short Hinglish caption or null"
+    "veo_prompt": "full generation prompt following ALL style rules above",
+    "negative_prompt": "exclusions following the negative-prompt rules above",
+    "caption_text": "short caption or null"
   }
 ]`;
 
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      systemInstruction: systemInstruction,
-      generationConfig: {
-        responseMimeType: "application/json",
-      }
-    });
+    const frequencyLine = FREQUENCY_GUIDANCE[brollFrequency as string]
+      ? `\n\nB-ROLL FREQUENCY (user choice: ${brollFrequency}): ${FREQUENCY_GUIDANCE[brollFrequency as string]}`
+      : '';
+    const editorLine = editorNotes
+      ? `\n\nEDITOR / CREATIVE DIRECTOR NOTES from the user (apply where possible): "${editorNotes}"`
+      : '';
 
-    const userPrompt = `Generate the B-Roll cut list and edit_timeline JSON for the following script:\n\n${script}
-    
+    const userPrompt = `Generate the B-Roll cut list and edit_timeline JSON for the following script:
+
+${script}
+
 Here is the exact mathematically calculated audio timeline for the script (in seconds).
 You MUST use these exact 'start' and 'end' values when assigning B-rolls to specific sentences so they sync perfectly:
-${timestamps ? JSON.stringify(timestamps, null, 2) : "No precise timestamps available."}`;
-    
-    const result = await model.generateContent(userPrompt);
-    const responseText = result.response.text();
-    
-    let planJson;
-    try {
-      planJson = JSON.parse(responseText);
-      if (!Array.isArray(planJson)) {
-        console.warn("Creative Director returned an object instead of array. Extracting 'broll' if exists.");
-        if (planJson.broll) planJson = planJson.broll;
-        else planJson = [planJson];
-      }
-    } catch (e) {
-      console.error("Failed to parse JSON from Creative Director:", responseText);
-      throw new Error("Creative Director did not return valid JSON");
+${timestamps ? JSON.stringify(timestamps, null, 2) : 'No precise timestamps available.'}${frequencyLine}${editorLine}`;
+
+    const raw = await getScriptAdapter(c.script.provider).generate({
+      system: systemInstruction,
+      prompt: userPrompt,
+      model: c.script.structuredModel,
+      fallbackModel: c.script.fallbackModel,
+      json: true,
+    });
+
+    let plan: any = extractJson(raw);
+    if (!Array.isArray(plan)) {
+      console.warn("Creative Director returned an object instead of array. Extracting 'broll' if it exists.");
+      plan = plan?.broll ?? [plan];
     }
 
-    // Since the new guide expects `plan` to be the array itself, return it!
-    return NextResponse.json({ success: true, plan: planJson });
+    if (jobId) {
+      await completeStage(jobId, 'broll_plan', {
+        broll_plan: plan,
+        broll_frequency: brollFrequency ?? null,
+        editor_notes: editorNotes ?? null,
+      });
+    }
 
+    return NextResponse.json({ success: true, plan });
   } catch (error: any) {
     console.error('Creative Director Error:', error);
+    if (jobId) await failStage(jobId, 'broll_plan', error).catch(() => {});
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

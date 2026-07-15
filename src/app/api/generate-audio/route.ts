@@ -2,154 +2,76 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegStatic from 'ffmpeg-static';
-import { v2 as cloudinary } from 'cloudinary';
+import { loadClientConfig } from '@/lib/clients/loadConfig';
+import { requireUser, forbidClientMismatch } from '@/lib/auth';
+import { getVoiceAdapter } from '@/lib/adapters/voice';
+import { getStorageAdapter } from '@/lib/adapters/storage';
+import { prepareScriptForTts, alignmentToSentenceTimestamps, normalizeAudio } from '@/lib/pipeline/audio';
+import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
-// Next.js Turbopack sometimes resolves static paths incorrectly to '\ROOT\'
-let resolvedFfmpegPath = ffmpegStatic as string;
-if (resolvedFfmpegPath && resolvedFfmpegPath.includes('ROOT')) {
-  resolvedFfmpegPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
-}
-
-if (resolvedFfmpegPath) {
-  ffmpeg.setFfmpegPath(resolvedFfmpegPath);
-}
-
+// POST /api/generate-audio — TTS + normalize + upload ('audio' stage).
+// Body: { clientId, text, globalSpeed?, jobId? }
 export async function POST(req: Request) {
+  let jobId: string | undefined;
+  let tempDir = '';
   try {
-    let { text, globalSpeed } = await req.json();
-    globalSpeed = parseFloat(globalSpeed) || 1.0;
+    const body = await req.json();
+    const { clientId, text } = body;
+    jobId = body.jobId;
+    const globalSpeed = parseFloat(body.globalSpeed) || 1.0;
 
-    if (!text) {
-      return NextResponse.json({ error: 'Text is required' }, { status: 400 });
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    const auth = await requireUser();
+    if (auth instanceof NextResponse) return auth;
+    const forbidden = forbidClientMismatch(auth, clientId);
+    if (forbidden) return forbidden;
+    if (jobId) {
+      const jobForbidden = await jobClientMismatch(jobId, clientId);
+      if (jobForbidden) return jobForbidden;
     }
+    if (!text) return NextResponse.json({ error: 'Text is required' }, { status: 400 });
 
-    const apiKey = process.env.ELEVENLABS_API_KEY;
-    const voiceId = process.env.ELEVENLABS_VOICE_ID;
-    if (!apiKey || !voiceId) throw new Error('ElevenLabs keys missing.');
+    const c = await loadClientConfig(clientId);
+    if (jobId) await startStage(jobId, 'audio');
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elevenlabs-native-'));
+    const prepared = prepareScriptForTts(text);
 
-    // --- PRE-PROCESS TEXT ---
-    // 1. Remove ALL UI section headers (e.g., THE HOOK:, EXPLANATION:, PROBLEM SETUP:)
-    text = text.replace(/^[A-Z0-9\s]+:/gm, '').trim();
-
-    // 2. Strip all manual emotion/pause brackets. 
-    // ElevenLabs reads natural context perfectly in a single request.
-    text = text.replace(/\[.*?\]/g, '');
-
-    // 3. Remove excessive whitespace that might confuse the parser
-    text = text.replace(/\s+/g, ' ').trim();
-
-    // --- ELEVENLABS NATIVE WITH-TIMESTAMPS API CALL ---
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/with-timestamps`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: text,
-        model_id: 'eleven_v3',
-        voice_settings: {
-          stability: 0.5
-        }
-      })
+    const { audioBase64, alignment } = await getVoiceAdapter(c.voice.provider).synthesize(prepared, {
+      voiceId: c.voice.voiceId,
+      modelId: c.voice.modelId,
+      stability: c.voice.stability,
     });
 
-    if (!response.ok) {
-      throw new Error(`ElevenLabs error: ${await response.text()}`);
-    }
+    const timestamps = alignmentToSentenceTimestamps(alignment, globalSpeed);
 
-    const data = await response.json();
-    const audioBase64 = data.audio_base64;
-    const alignment = data.alignment; // { characters: [], character_start_times_seconds: [], character_end_times_seconds: [] }
-
-    // --- PARSE ALIGNMENT INTO SENTENCES ---
-    const timestamps: any[] = [];
-    let currentText = "";
-    let currentStart = -1;
-
-    for (let i = 0; i < alignment.characters.length; i++) {
-      const char = alignment.characters[i];
-      const startSec = alignment.character_start_times_seconds[i];
-      const endSec = alignment.character_end_times_seconds[i];
-
-      if (currentStart === -1 && char.trim() !== "") {
-        currentStart = startSec;
-      }
-
-      currentText += char;
-
-      // Check for end of sentence
-      const isPunctuation = ['.', '!', '?', '\n'].includes(char);
-      const isEnd = i === alignment.characters.length - 1;
-      const nextIsSpaceOrEnd = isEnd || [' ', '\n'].includes(alignment.characters[i + 1]);
-
-      if ((isPunctuation && nextIsSpaceOrEnd) || isEnd) {
-        if (currentText.trim() !== "") {
-          // Adjust timestamps mathematically based on our FFmpeg globalSpeed
-          timestamps.push({
-            text: currentText.trim(),
-            start: parseFloat((currentStart / globalSpeed).toFixed(2)),
-            end: parseFloat((endSec / globalSpeed).toFixed(2)),
-            marker: 'default' // Keeping default for backwards compatibility
-          });
-        }
-        currentText = "";
-        currentStart = -1;
-      }
-    }
-
-    // --- SAVE AND PROCESS AUDIO VIA FFMPEG ---
-    const rawMp3Path = path.join(tempDir, `raw.mp3`);
-    const finalMp3Path = path.join(tempDir, `final.mp3`);
-
-    // Decode base64 to raw MP3 file
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-audio-'));
+    const rawMp3Path = path.join(tempDir, 'raw.mp3');
+    const finalMp3Path = path.join(tempDir, 'final.mp3');
     fs.writeFileSync(rawMp3Path, Buffer.from(audioBase64, 'base64'));
+    await normalizeAudio(rawMp3Path, finalMp3Path, globalSpeed);
 
-    // Final Encode with LUFS normalization and speed
-    await new Promise((resolve, reject) => {
-      ffmpeg(rawMp3Path)
-        .audioFilter([
-          `atempo=${globalSpeed.toFixed(4)}`, // mathematically synced with the timestamps above!
-          'loudnorm=I=-16:TP=-1.5:LRA=11'
-        ])
-        .audioBitrate('128k')
-        .on('end', resolve)
-        .on('error', reject)
-        .save(finalMp3Path);
-    });
+    const folderPrefix = c.storage.folderPrefix || c.id;
+    const audioUrl = await getStorageAdapter(c.storage.provider).upload(
+      fs.readFileSync(finalMp3Path),
+      { folder: `${folderPrefix}/audio`, resourceType: 'video' }
+    );
 
-    const finalBuffer = fs.readFileSync(finalMp3Path);
+    if (jobId) {
+      await completeStage(jobId, 'audio', {
+        audio_url: audioUrl,
+        audio_timestamps: timestamps,
+        speech_speed: globalSpeed,
+      });
+    }
 
-    // Upload to Cloudinary
-    const audioUrl = await new Promise<string>((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        { resource_type: "video", folder: "dr_kiran_audio" },
-        (error, result) => {
-          if (error) return reject(error);
-          if (result) return resolve(result.secure_url);
-          reject(new Error("Unknown Cloudinary error"));
-        }
-      );
-      uploadStream.end(finalBuffer);
-    });
-
-    // Cleanup temp dir
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) { }
-
-    return NextResponse.json({ success: true, audioUrl: audioUrl, timestamps: timestamps });
+    return NextResponse.json({ success: true, audioUrl, timestamps });
   } catch (error: any) {
     console.error('Audio Generation Error:', error);
+    if (jobId) await failStage(jobId, 'audio', error).catch(() => {});
     return NextResponse.json({ error: error.message }, { status: 500 });
+  } finally {
+    if (tempDir) {
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    }
   }
 }
