@@ -2,27 +2,41 @@
 
 import { useState, useEffect } from "react";
 import ScriptDisplay from "@/components/ScriptDisplay";
-import { Sparkles, Loader2, UserCheck, ArrowRight, Edit3, Info, Video, Mic, Settings, Copy, History, Plus, LogOut } from "lucide-react";
+import { Sparkles, Loader2, UserCheck, ArrowRight, Edit3, Info, Video, Mic, Settings, Copy, History, Plus, LogOut, Upload, X, Package } from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
+import { stageLabel, statusLabel } from "@/lib/labels";
 
-// All client-specific data (templates, avatars, stage plan, duration bounds)
-// comes from /api/clients/[id]/ui-config. Nothing client-specific is hardcoded.
+// All client-specific data (pipelines, templates, avatars) comes from
+// /api/clients/[id]/ui-config. Nothing client-specific is hardcoded.
+// Which screens a reel shows is driven by the JOB's stage_plan — the pipeline's
+// enabled stages with this reel's per-reel choices (voiceover, injected script)
+// already applied server-side.
 
 interface UiTemplate { label: string; description: string | null; previewVideoUrl: string | null }
 interface UiAvatar { label: string; previewImageUrl: string | null }
+interface UiPipeline {
+  id: string;
+  name: string;
+  productInput: boolean;
+  hasVoiceStages: boolean;
+  stagePlan: { name: string; label: string }[];
+  duration: { minSec: number; maxSec: number; defaultSec: number };
+}
 interface UiConfig {
   id: string;
+  slug: string;
   displayName: string;
-  tier: string;
-  contentType: string;
   localeLanguage: string;
-  stagePlan: { name: string; label: string }[];
+  pipelines: UiPipeline[];
   templates: UiTemplate[];
   avatars: UiAvatar[];
-  duration: { minSec: number; maxSec: number; defaultSec: number };
 }
 
 const BROLL_OPTIONS = ["Minimal", "Standard", "High"];
+
+// Note: <body> is a flex column (layout.tsx), so every screen's root <main>
+// carries `w-full min-w-0` — a flex item's default min-width:auto refuses to
+// shrink below its nowrap/truncated content and pushes the page sideways.
 
 export default function Home() {
   // --- Client & job context ---
@@ -31,9 +45,19 @@ export default function Home() {
   const [isLoadingClient, setIsLoadingClient] = useState(false);
   const [recentJobs, setRecentJobs] = useState<any[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [activePlan, setActivePlan] = useState<string[]>([]);
   const [inFlow, setInFlow] = useState(false);
-
   const [step, setStep] = useState<number>(1);
+
+  // --- Reel setup (pre-flow) ---
+  const [setupMode, setSetupMode] = useState(false);
+  const [selectedPipelineId, setSelectedPipelineId] = useState<string>("");
+  const [voiceover, setVoiceover] = useState(true);
+  const [injectMode, setInjectMode] = useState(false);
+  const [injectedScript, setInjectedScript] = useState("");
+  const [productUrls, setProductUrls] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
 
   // --- Topic selection ---
   const [topic, setTopic] = useState("");
@@ -44,7 +68,6 @@ export default function Home() {
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [englishScript, setEnglishScript] = useState("");
   const [targetDuration, setTargetDuration] = useState("45");
-  const [revisionNotes, setRevisionNotes] = useState("");
   const [finalScript, setFinalScript] = useState<any>(null);
 
   // --- Confirm flow ---
@@ -56,7 +79,7 @@ export default function Home() {
   const [selectedAvatar, setSelectedAvatar] = useState("");
   const [brollFrequency, setBrollFrequency] = useState("Standard");
   const [editorInstructions, setEditorInstructions] = useState("");
-  const [globalSpeed, setGlobalSpeed] = useState("1.0");
+  const [globalSpeed] = useState("1.0");
 
   // --- Audio ---
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
@@ -75,21 +98,32 @@ export default function Home() {
   const [isAssembling, setIsAssembling] = useState(false);
   const [finalAssembledVideoUrl, setFinalAssembledVideoUrl] = useState<string | null>(null);
 
-  const hasStage = (name: string) => !!client?.stagePlan.some((s) => s.name === name);
+  const hasStage = (name: string) => activePlan.includes(name);
   const templatesByLabel: Record<string, UiTemplate> = Object.fromEntries(
     (client?.templates ?? []).map((t) => [t.label, t])
   );
+  const selectedPipeline = client?.pipelines.find((p) => p.id === selectedPipelineId) ?? null;
+  const pipelineHasStage = (p: UiPipeline | null, name: string) => !!p?.stagePlan.some((s) => s.name === name);
+  // A pipeline that generates no script of its own REQUIRES the user to supply one.
+  const mustPasteScript = !!selectedPipeline && !pipelineHasStage(selectedPipeline, "script");
+  const willInject = mustPasteScript || injectMode;
 
-  // Screens shown in the stepper, derived from the client's stage plan.
-  const stepperSteps = client
-    ? [
-        { num: 1, label: "Topic" },
-        { num: 2, label: "Script" },
-        ...(hasStage("audio") ? [{ num: 3, label: "Architect" }, { num: 4, label: "Audio" }] : []),
-        ...(hasStage("avatar") || hasStage("broll_plan") ? [{ num: 5, label: "Assets" }] : []),
-        ...(hasStage("assemble") ? [{ num: 6, label: "Final" }] : []),
-      ]
-    : [];
+  // Screens are derived from this reel's stage plan — no hardcoded pipeline shape.
+  const showTopic = hasStage("topic");
+  const showScript = hasStage("script") || hasStage("adapt_voice") || !!finalScript;
+  const showArchitect = hasStage("audio") || hasStage("broll_plan");
+  const showAudio = hasStage("audio");
+  const showAssets = hasStage("avatar") || hasStage("broll_plan");
+  const showFinal = hasStage("assemble");
+
+  const stepperSteps = [
+    ...(showTopic ? [{ num: 1, label: "Topic" }] : []),
+    ...(showScript ? [{ num: 2, label: "Script" }] : []),
+    ...(showArchitect ? [{ num: 3, label: "Architect" }] : []),
+    ...(showAudio ? [{ num: 4, label: "Audio" }] : []),
+    ...(showAssets ? [{ num: 5, label: "Assets" }] : []),
+    ...(showFinal ? [{ num: 6, label: "Final" }] : []),
+  ];
   const stepperIndex = Math.max(0, stepperSteps.findIndex((s) => s.num >= step));
 
   // Mount: load client list + deep links (?client= / ?job=)
@@ -120,8 +154,8 @@ export default function Home() {
       setSuggestedTopics([]);
       setConfirmedTopics({});
       setManualOverrides({});
+      setSelectedPipelineId(cfg.pipelines?.[0]?.id ?? "");
       setClient(cfg);
-      setTargetDuration(String(cfg.duration.defaultSec));
       if (cfg.avatars.length > 0) setSelectedAvatar(cfg.avatars[0].label);
       await refreshJobs(id);
       return cfg;
@@ -151,13 +185,29 @@ export default function Home() {
     }
   }
 
+  function resetArtifacts() {
+    setEnglishScript("");
+    setFinalScript(null);
+    setAudioUrl(null);
+    setAudioTimestamps(null);
+    setAvatarVideoUrl(null);
+    setBrollPlan(null);
+    setFinalAssembledVideoUrl(null);
+  }
+
   function hydrateFromJob(job: any) {
     setJobId(job.id);
+    const plan: string[] = job.stage_plan?.length ? job.stage_plan : [];
+    setActivePlan(plan);
+    if (job.pipeline_id) setSelectedPipelineId(job.pipeline_id);
+    setProductUrls(job.product_image_urls ?? []);
     setTopic(job.topic || "");
     if (job.target_duration_sec) setTargetDuration(String(job.target_duration_sec));
     if (job.english_script) setEnglishScript(job.english_script);
     if (job.full_script) {
       setFinalScript({ ...(job.script_meta || {}), topic: job.topic, template: job.template, fullScript: job.full_script });
+    } else {
+      setFinalScript(null);
     }
     if (job.avatar_label) setSelectedAvatar(job.avatar_label);
     if (job.broll_frequency) setBrollFrequency(job.broll_frequency);
@@ -168,79 +218,162 @@ export default function Home() {
     setBrollPlan(job.broll_plan || null);
     setFinalAssembledVideoUrl(job.final_video_url || null);
 
-    let s = 1;
+    // Land on the furthest screen this reel's artifacts support, clamped to
+    // the stages this reel actually has.
+    let s = plan.includes("topic") ? 1 : 2;
     if (job.full_script) s = 2;
     if (job.audio_url) s = 4;
     if (job.avatar_video_url || job.broll_plan) s = 5;
     if (job.final_video_url) s = 6;
     setStep(s);
     setInFlow(true);
+    setSetupMode(false);
   }
 
-  function startNewReel() {
+  function openSetup() {
+    if (!client) return;
+    if (client.pipelines.length === 0) {
+      alert("This client has no active pipelines. Add one in Admin → Client → Pipelines.");
+      return;
+    }
     setJobId(null);
+    setActivePlan([]);
+    resetArtifacts();
     setTopic("");
-    setEnglishScript("");
-    setFinalScript(null);
+    setSuggestedTopics([]);
     setConfirmedTopics({});
     setManualOverrides({});
-    setAudioUrl(null);
-    setAudioTimestamps(null);
-    setAvatarVideoUrl(null);
-    setBrollPlan(null);
-    setFinalAssembledVideoUrl(null);
     setEditorInstructions("");
+    setSelectedPipelineId(client.pipelines[0].id);
+    setVoiceover(true);
+    setInjectMode(false);
+    setInjectedScript("");
+    setProductUrls([]);
     setStep(1);
-    setInFlow(true);
-    if (suggestedTopics.length === 0 && !isGeneratingTopics) handleGenerateTopics();
+    setInFlow(false);
+    setSetupMode(true);
   }
 
   function backToHome() {
     setInFlow(false);
+    setSetupMode(false);
     if (client) refreshJobs(client.id);
   }
 
-  const handleGenerateTopics = async (customQuery = "") => {
+  async function handleProductFiles(files: FileList | null) {
+    if (!files || !client) return;
+    setIsUploading(true);
+    try {
+      const urls = [...productUrls];
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("clientId", client.id);
+        const res = await fetch("/api/uploads", { method: "POST", body: fd });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error);
+        urls.push(d.url);
+      }
+      setProductUrls(urls);
+    } catch (err: any) {
+      alert("Product photo upload failed: " + err.message);
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  // Create the reel job with this reel's pipeline + per-reel choices. The server
+  // resolves and snapshots the stage plan; the UI follows that plan from here.
+  async function handleStartReel() {
+    if (!client || !selectedPipeline) return;
+    if (willInject && !injectedScript.trim()) {
+      alert("Paste the script to continue.");
+      return;
+    }
+    setIsStarting(true);
+    try {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId: client.id,
+          pipelineId: selectedPipeline.id,
+          voiceover: selectedPipeline.hasVoiceStages ? voiceover : true,
+          injectedScript: willInject ? injectedScript : undefined,
+          productImageUrls: productUrls,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      const job = data.job;
+      const plan: string[] = job.stage_plan ?? [];
+      setJobId(job.id);
+      setActivePlan(plan);
+      setTargetDuration(String(selectedPipeline.duration.defaultSec));
+      resetArtifacts();
+
+      if (plan.includes("topic")) {
+        setStep(1);
+        setInFlow(true);
+        setSetupMode(false);
+        await generateTopics(job.id, "");
+      } else {
+        // Injected / client-supplied script: no topic or script generation.
+        setEnglishScript(injectedScript);
+        if (plan.includes("adapt_voice")) {
+          const hin = await fetch("/api/generate-hinglish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientId: client.id, jobId: job.id, topic: "", englishScript: injectedScript }),
+          });
+          const hd = await hin.json();
+          if (!hin.ok) throw new Error(hd.error);
+          setFinalScript(hd.script);
+        } else {
+          setFinalScript({
+            topic: "Client-supplied script",
+            template: "—",
+            wordCount: injectedScript.trim().split(/\s+/).length,
+            estimatedDuration: `${selectedPipeline.duration.defaultSec}s`,
+            fullScript: injectedScript,
+          });
+        }
+        setStep(2);
+        setInFlow(true);
+        setSetupMode(false);
+      }
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function generateTopics(jid: string, customQuery: string) {
     if (!client) return;
     setIsGeneratingTopics(true);
     setSuggestedTopics([]);
     try {
-      const url = customQuery
-        ? `/api/generate-topic?client=${client.id}&query=${encodeURIComponent(customQuery)}`
-        : `/api/generate-topic?client=${client.id}`;
-      const res = await fetch(url);
+      const res = await fetch("/api/generate-topic", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: client.id, jobId: jid, query: customQuery }),
+      });
       const data = await res.json();
-      if (res.ok) {
-        setSuggestedTopics(data.topics);
-      } else {
-        alert("Failed to generate topics: " + data.error);
-      }
-    } catch (err) {
+      if (res.ok) setSuggestedTopics(data.topics);
+      else alert("Failed to generate topics: " + data.error);
+    } catch {
       alert("Error generating topics");
     } finally {
       setIsGeneratingTopics(false);
     }
-  };
+  }
 
-  const handleGenerateFullScript = async (isRevision = false) => {
-    if (!topic || !client) return;
+  const handleGenerateFullScript = async () => {
+    if (!topic || !client || !jobId) return;
     setIsGeneratingScript(true);
     try {
-      // Create the job on first generation so every artifact persists.
-      let jid = jobId;
-      if (!jid) {
-        const jobRes = await fetch("/api/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientId: client.id }),
-        });
-        const jobData = await jobRes.json();
-        if (!jobRes.ok) throw new Error(jobData.error);
-        jid = jobData.job.id;
-        setJobId(jid);
-      }
-
-      // Determine template
       const selectedTopicObj = suggestedTopics.find((t) => t.topic === topic);
       let templateToUse = "Auto";
       if (manualOverrides[topic]) {
@@ -251,10 +384,8 @@ export default function Home() {
           : selectedTopicObj.primaryTemplate;
       }
 
-      // 1. Generate English
-      const payload: any = { clientId: client.id, jobId: jid, topic, targetDuration };
+      const payload: any = { clientId: client.id, jobId, topic, targetDuration };
       if (templateToUse !== "Auto") payload.forceTemplate = templateToUse;
-      if (isRevision && revisionNotes) payload.revisionNotes = revisionNotes;
 
       const resEng = await fetch("/api/generate-english", {
         method: "POST",
@@ -263,16 +394,14 @@ export default function Home() {
       });
       const dataEng = await resEng.json();
       if (!resEng.ok) throw new Error(dataEng.error);
-
       setEnglishScript(dataEng.englishScript);
 
-      // 2. Voice adaptation — only when the client's stage plan includes it.
-      // English-language clients use the English script as the final script.
+      // Voice adaptation only when this reel's plan includes it.
       if (hasStage("adapt_voice")) {
         const resHin = await fetch("/api/generate-hinglish", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientId: client.id, jobId: jid, topic, englishScript: dataEng.englishScript }),
+          body: JSON.stringify({ clientId: client.id, jobId, topic, englishScript: dataEng.englishScript }),
         });
         const dataHin = await resHin.json();
         if (!resHin.ok) throw new Error(dataHin.error);
@@ -291,7 +420,6 @@ export default function Home() {
       alert(err.message);
     } finally {
       setIsGeneratingScript(false);
-      setRevisionNotes("");
     }
   };
 
@@ -335,14 +463,18 @@ export default function Home() {
     }
   };
 
+  // No-voiceover reels skip audio entirely and go straight to the visual stages.
+  const proceedFromArchitect = () => {
+    if (hasStage("audio")) handleGenerateAudio();
+    else handleGenerateVideoPipeline();
+  };
+
   const handleGenerateVideoPipeline = async () => {
     if (!client) return;
     setIsGeneratingVideoPipeline(true);
     setAvatarVideoUrl(null);
     setBrollPlan(null);
     try {
-      let newAvatarUrl: string | null = null;
-
       if (hasStage("avatar")) {
         const avatarRes = await fetch("/api/generate-avatar", {
           method: "POST",
@@ -351,8 +483,7 @@ export default function Home() {
         });
         const avatarData = await avatarRes.json();
         if (!avatarData.success) throw new Error(avatarData.error);
-        newAvatarUrl = avatarData.avatarVideoUrl;
-        setAvatarVideoUrl(newAvatarUrl);
+        setAvatarVideoUrl(avatarData.avatarVideoUrl);
       }
 
       if (hasStage("broll_plan")) {
@@ -421,8 +552,8 @@ export default function Home() {
         ? "bg-green-500/20 text-green-400 border-green-500/30"
         : "bg-amber-500/20 text-amber-400 border-amber-500/30";
     return (
-      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${color}`}>
-        {job.current_stage} · {job.stage_status}
+      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border whitespace-nowrap ${color}`}>
+        {stageLabel(job.current_stage)} · {statusLabel(job.stage_status)}
       </span>
     );
   };
@@ -433,7 +564,7 @@ export default function Home() {
   if (!client) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
-        <div className="glass-card p-12 max-w-md w-full text-center space-y-6 shadow-2xl">
+        <div className="glass-card p-8 sm:p-12 max-w-md w-full text-center space-y-6 shadow-2xl">
           <div className="mx-auto w-20 h-20 bg-primary/20 rounded-full flex items-center justify-center mb-6 border border-primary/40">
             <UserCheck size={32} className="text-primary" />
           </div>
@@ -447,7 +578,7 @@ export default function Home() {
                 <button
                   key={c.id}
                   onClick={() => selectClient(c.id)}
-                  className="w-full py-4 bg-primary hover:bg-primary-hover text-white rounded-lg font-bold transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)]"
+                  className="w-full py-4 px-4 bg-primary hover:bg-primary-hover text-white rounded-lg font-bold transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)]"
                 >
                   {c.displayName}
                 </button>
@@ -465,19 +596,170 @@ export default function Home() {
   }
 
   // ---------------------------------------------------------------------------
+  // SCREEN: reel setup (pipeline + per-reel choices)
+  // ---------------------------------------------------------------------------
+  if (setupMode) {
+    return (
+      <main className="min-h-screen w-full min-w-0 py-8 sm:py-12 px-4 sm:px-6 lg:px-8 max-w-3xl mx-auto">
+        <div className="flex justify-between items-center gap-4 mb-8">
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">New Reel</h1>
+          <button onClick={backToHome} className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition-colors shrink-0">
+            Cancel
+          </button>
+        </div>
+
+        <div className="space-y-6">
+          {/* Pipeline picker */}
+          {client.pipelines.length > 1 && (
+            <div className="glass-card p-6">
+              <h2 className="text-lg font-bold text-white mb-4">1. Choose pipeline</h2>
+              <div className="space-y-3">
+                {client.pipelines.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedPipelineId(p.id)}
+                    className={`w-full text-left p-4 rounded-xl border transition-all ${selectedPipelineId === p.id ? "bg-primary/20 border-primary" : "bg-indigo-950/30 border-gray-700 hover:border-gray-500"}`}
+                  >
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <span className="text-white font-semibold">{p.name}</span>
+                      {p.productInput && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                          <Package size={11} /> product
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {p.stagePlan.map((s) => (
+                        <span key={s.name} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">{s.label}</span>
+                      ))}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {selectedPipeline && (
+            <div className="glass-card p-6 space-y-6">
+              <h2 className="text-lg font-bold text-white">
+                {client.pipelines.length > 1 ? "2. This reel" : "This reel"}
+                <span className="text-gray-500 font-normal text-sm ml-2">{selectedPipeline.name}</span>
+              </h2>
+
+              {client.pipelines.length === 1 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedPipeline.stagePlan.map((s) => (
+                    <span key={s.name} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">{s.label}</span>
+                  ))}
+                </div>
+              )}
+
+              {/* Voiceover toggle — per reel, not per client */}
+              {selectedPipeline.hasVoiceStages && (
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-white font-semibold text-sm">Include voiceover</p>
+                    <p className="text-gray-500 text-xs mt-1">
+                      Off = no voice script and no text-to-speech for this reel (video + music only). The avatar step is skipped too — it needs an audio track.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setVoiceover(!voiceover)}
+                    className={`shrink-0 px-4 py-2 rounded-lg border font-semibold text-sm transition-all ${voiceover ? "bg-green-500/20 text-green-400 border-green-500/40" : "bg-gray-800/40 text-gray-400 border-gray-700"}`}
+                  >
+                    {voiceover ? "ON" : "OFF"}
+                  </button>
+                </div>
+              )}
+
+              {/* Script injection */}
+              {!mustPasteScript && pipelineHasStage(selectedPipeline, "script") && (
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-white font-semibold text-sm">Use my own script</p>
+                    <p className="text-gray-500 text-xs mt-1">Paste a script instead of generating one — skips topic &amp; script generation.</p>
+                  </div>
+                  <button
+                    onClick={() => setInjectMode(!injectMode)}
+                    className={`shrink-0 px-4 py-2 rounded-lg border font-semibold text-sm transition-all ${injectMode ? "bg-green-500/20 text-green-400 border-green-500/40" : "bg-gray-800/40 text-gray-400 border-gray-700"}`}
+                  >
+                    {injectMode ? "ON" : "OFF"}
+                  </button>
+                </div>
+              )}
+
+              {willInject && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">
+                    {mustPasteScript ? "Your script (required)" : "Your script"}
+                  </label>
+                  <textarea
+                    value={injectedScript}
+                    onChange={(e) => setInjectedScript(e.target.value)}
+                    placeholder="Paste the script here. It will be optimized for the downstream tools before the reel is produced."
+                    className="w-full bg-black/40 border border-gray-700 text-sm rounded-lg p-4 text-white outline-none focus:ring-1 focus:ring-primary h-40 resize-none leading-relaxed"
+                  />
+                </div>
+              )}
+
+              {/* Per-reel product photos */}
+              {selectedPipeline.productInput && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Product photos</label>
+                  <p className="text-gray-500 text-xs mb-3">Uploaded per reel — used as reference for this generation only. Nothing is saved to the client.</p>
+                  <div className="flex flex-wrap gap-3 mb-3">
+                    {productUrls.map((u, i) => (
+                      <div key={i} className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-700">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={u} alt={`Product ${i + 1}`} className="w-full h-full object-cover" />
+                        <button
+                          onClick={() => setProductUrls(productUrls.filter((_, j) => j !== i))}
+                          className="absolute top-0.5 right-0.5 bg-black/70 rounded-full p-0.5 text-gray-300 hover:text-white"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                    <label className={`w-20 h-20 rounded-lg border border-dashed border-gray-600 flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-gray-400 transition-colors ${isUploading ? "opacity-50" : ""}`}>
+                      {isUploading ? <Loader2 size={18} className="animate-spin text-primary" /> : <Upload size={18} className="text-gray-500" />}
+                      <span className="text-[10px] text-gray-500">Add</span>
+                      <input type="file" accept="image/*" multiple className="hidden" disabled={isUploading} onChange={(e) => handleProductFiles(e.target.files)} />
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <button
+                onClick={handleStartReel}
+                disabled={isStarting || isUploading}
+                className="w-full py-4 bg-primary hover:bg-primary-hover text-white rounded-xl font-extrabold text-lg flex justify-center items-center gap-3 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)] disabled:opacity-50"
+              >
+                {isStarting ? <Loader2 className="animate-spin" size={20} /> : <ArrowRight size={20} />}
+                Start Reel
+              </button>
+            </div>
+          )}
+        </div>
+      </main>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // SCREEN: client home — new reel + recent jobs (resume)
   // ---------------------------------------------------------------------------
   if (!inFlow) {
     return (
-      <main className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-12">
-          <div>
-            <h1 className="text-4xl font-extrabold text-white tracking-tight">
+      <main className="min-h-screen w-full min-w-0 py-8 sm:py-12 px-4 sm:px-6 lg:px-8 max-w-4xl mx-auto">
+        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-10">
+          <div className="min-w-0">
+            <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight truncate">
               {client.displayName} <span className="gradient-text">Studio</span>
             </h1>
-            <p className="text-gray-400 text-sm mt-1 capitalize">{client.tier.replace(/_/g, " ")} · {client.contentType.replace(/_/g, " ")}</p>
+            <p className="text-gray-400 text-sm mt-1 truncate">
+              {client.pipelines.length > 0 ? client.pipelines.map((p) => p.name).join(" · ") : "No active pipelines"}
+            </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <a href="/admin" className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition-colors">Admin</a>
             <button
               onClick={() => { setClient(null); setInFlow(false); }}
@@ -492,13 +774,13 @@ export default function Home() {
         </div>
 
         <button
-          onClick={startNewReel}
+          onClick={openSetup}
           className="w-full py-5 mb-10 bg-primary hover:bg-primary-hover text-white rounded-xl font-extrabold text-lg flex justify-center items-center gap-3 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)]"
         >
           <Plus size={22} /> Start New Reel
         </button>
 
-        <div className="glass-card p-8">
+        <div className="glass-card p-6 sm:p-8">
           <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-6"><History size={20} className="text-primary" /> Recent Reels</h2>
           {recentJobs.length === 0 ? (
             <p className="text-gray-500 text-sm py-4">No reels yet. Start your first one above.</p>
@@ -512,7 +794,10 @@ export default function Home() {
                 >
                   <div className="flex-1 min-w-0">
                     <p className="text-white font-semibold truncate">{job.topic || "Untitled reel"}</p>
-                    <p className="text-xs text-gray-500 mt-1">{new Date(job.created_at).toLocaleString()}</p>
+                    <p className="text-xs text-gray-500 mt-1 truncate">
+                      {new Date(job.created_at).toLocaleString()}
+                      {job.pipeline_name ? ` · ${job.pipeline_name}` : ""}
+                    </p>
                   </div>
                   {stageBadge(job)}
                 </button>
@@ -528,57 +813,57 @@ export default function Home() {
   // SCREEN: the reel flow
   // ---------------------------------------------------------------------------
   return (
-    <main className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-12">
-        <div>
-          <h1 className="text-4xl font-extrabold text-white tracking-tight">
+    <main className="min-h-screen w-full min-w-0 py-8 sm:py-12 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-10">
+        <div className="min-w-0">
+          <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight truncate">
             {client.displayName} <span className="gradient-text">Studio</span>
           </h1>
-          <p className="text-gray-400 text-sm mt-1">
+          <p className="text-gray-400 text-sm mt-1 truncate">
             {stepperSteps.map((s) => s.label).join(" → ")}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={backToHome}
             className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition-colors"
           >
             All Reels
           </button>
-          <div className="px-3 py-1.5 rounded-full bg-green-500/20 text-green-400 text-sm font-semibold border border-green-500/30 flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-            {client.displayName}
+          <div className="px-3 py-1.5 rounded-full bg-green-500/20 text-green-400 text-sm font-semibold border border-green-500/30 flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse shrink-0"></span>
+            <span className="truncate">{client.displayName}</span>
           </div>
         </div>
       </div>
 
-      {/* Stepper (rendered from the client's stage plan) */}
-      <div className="flex items-center justify-between mb-10 relative">
-        <div className="absolute top-1/2 left-0 w-full h-1 bg-gray-800 -z-10 -translate-y-1/2"></div>
+      {/* Stepper (rendered from this reel's stage plan) */}
+      <div className="flex items-start justify-between mb-10 relative">
+        <div className="absolute top-5 left-0 w-full h-1 bg-gray-800 -z-10"></div>
         <div
-          className="absolute top-1/2 left-0 h-1 bg-primary -z-10 -translate-y-1/2 transition-all duration-500"
+          className="absolute top-5 left-0 h-1 bg-primary -z-10 transition-all duration-500"
           style={{ width: `${stepperSteps.length > 1 ? (stepperIndex / (stepperSteps.length - 1)) * 100 : 0}%` }}
         ></div>
 
         {stepperSteps.map((s, idx) => (
-          <div key={s.label} className="flex flex-col items-center gap-2">
-            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-all duration-300 ${step >= s.num ? 'bg-primary text-white shadow-[0_0_15px_rgba(99,102,241,0.5)]' : 'bg-gray-800 text-gray-500 border border-gray-700'}`}>
+          <div key={s.label} className="flex flex-col items-center gap-2 flex-1 min-w-0">
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-all duration-300 shrink-0 ${step >= s.num ? 'bg-primary text-white shadow-[0_0_15px_rgba(99,102,241,0.5)]' : 'bg-gray-800 text-gray-500 border border-gray-700'}`}>
               {idx + 1}
             </div>
-            <span className={`text-xs font-semibold ${step >= s.num ? 'text-white' : 'text-gray-600'}`}>{s.label}</span>
+            <span className={`text-[10px] sm:text-xs font-semibold truncate max-w-full ${step >= s.num ? 'text-white' : 'text-gray-600'}`}>{s.label}</span>
           </div>
         ))}
       </div>
 
       {/* STEP 1: TOPIC SELECTION */}
-      {step === 1 && (
+      {step === 1 && showTopic && (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
-          <div className="glass-card p-8">
-            <div className="flex justify-between items-center mb-6">
+          <div className="glass-card p-6 sm:p-8">
+            <div className="flex justify-between items-center gap-4 mb-6 flex-wrap">
               <h2 className="text-2xl font-bold text-white flex items-center gap-2"><Sparkles className="text-primary"/> Auto-Suggested Topics</h2>
               <button
                 type="button"
-                onClick={() => handleGenerateTopics(topic)}
+                onClick={() => jobId && generateTopics(jobId, topic)}
                 disabled={isGeneratingTopics}
                 className="flex items-center gap-2 text-sm px-4 py-2 bg-indigo-900/40 text-primary hover:bg-indigo-900/60 rounded-lg transition-colors disabled:opacity-50 border border-primary/20"
               >
@@ -587,7 +872,7 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="mb-6 relative">
+            <div className="mb-6">
               <input
                 type="text"
                 value={topic}
@@ -596,6 +881,37 @@ export default function Home() {
                 className="w-full px-4 py-4 bg-black/40 border border-gray-700 rounded-lg focus:ring-2 focus:ring-primary text-white placeholder-gray-500 outline-none text-lg"
               />
             </div>
+
+            {/* Custom topic that matches no suggestion — go straight to script. */}
+            {topic.trim() && !suggestedTopics.some((t) => t.topic === topic) && (
+              <div className="mb-6 p-5 rounded-xl border border-primary/40 bg-primary/10 space-y-4 animate-in fade-in">
+                <div>
+                  <p className="text-white font-semibold">Use your own topic</p>
+                  <p className="text-gray-400 text-sm mt-1 break-words">&ldquo;{topic}&rdquo;</p>
+                  <p className="text-gray-500 text-xs mt-2">The AI picks the best template for it. Or hit Refresh Suggestions to get angles on this topic first.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Target Duration ({targetDuration}s)</label>
+                  <input
+                    type="range"
+                    min={selectedPipeline?.duration.minSec ?? 15}
+                    max={selectedPipeline?.duration.maxSec ?? 90}
+                    step="5"
+                    value={targetDuration}
+                    onChange={(e) => setTargetDuration(e.target.value)}
+                    className="w-full accent-primary h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer mt-1"
+                  />
+                </div>
+                <button
+                  onClick={handleGenerateFullScript}
+                  disabled={isGeneratingScript}
+                  className="w-full py-3 bg-primary hover:bg-primary-hover text-white rounded-lg font-bold flex justify-center items-center gap-2 disabled:opacity-40 transition-all"
+                >
+                  {isGeneratingScript ? <Loader2 className="animate-spin" size={18} /> : <ArrowRight size={18} />}
+                  Generate Script with this topic
+                </button>
+              </div>
+            )}
 
             {suggestedTopics.length > 0 ? (
               <div className="grid grid-cols-1 gap-4 animate-in fade-in">
@@ -608,7 +924,7 @@ export default function Home() {
                       onClick={() => handleSelectTopic(item)}
                     >
                       <div className="flex justify-between items-start gap-4">
-                        <div className="flex-1 space-y-2">
+                        <div className="flex-1 space-y-2 min-w-0">
                           <h3 className="text-white font-bold text-lg leading-tight">{item.topic}</h3>
                           {item.suggestedTemplate && (
                             <div className="flex items-center gap-2">
@@ -620,9 +936,9 @@ export default function Home() {
                         </div>
 
                         {item.reasoning && (
-                          <div className="group relative">
+                          <div className="group relative shrink-0">
                             <Info size={20} className="text-gray-400 hover:text-primary transition-colors cursor-help" />
-                            <div className="absolute right-0 top-6 w-72 p-4 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 text-sm space-y-3">
+                            <div className="absolute right-0 top-6 w-[min(18rem,80vw)] p-4 bg-gray-900 border border-gray-700 rounded-lg shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 text-sm space-y-3">
                               <div>
                                 <strong className="text-primary block mb-1">Why perfect for you?</strong>
                                 {Array.isArray(item.reasoning.perfectForYou) ? (
@@ -644,9 +960,8 @@ export default function Home() {
 
                       {isSelected && (
                         <div className="pt-4 border-t border-gray-700 mt-2" onClick={(e) => e.stopPropagation()}>
-
                           <div className="bg-black/30 rounded-lg p-4 mb-4 border border-indigo-900/50">
-                            <div className="flex justify-between items-center mb-2">
+                            <div className="flex justify-between items-center gap-3 mb-2 flex-wrap">
                               <h4 className="text-sm font-bold text-indigo-300 uppercase tracking-wider">AI Recommendation</h4>
                               {item.primaryTemplate && (
                                 <button
@@ -678,13 +993,13 @@ export default function Home() {
                                   onClick={() => setConfirmedTopics(prev => ({...prev, [item.topic]: true}))}
                                   className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium transition-colors"
                                 >
-                                  [Confirm]
+                                  Confirm
                                 </button>
                                 <button
                                   onClick={() => setShowTemplateDropdown(prev => ({...prev, [item.topic]: !prev[item.topic]}))}
                                   className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-600 rounded-md text-sm font-medium transition-colors"
                                 >
-                                  [Change Template]
+                                  Change Template
                                 </button>
                               </>
                             ) : (
@@ -697,11 +1012,11 @@ export default function Home() {
                           {showTemplateDropdown[item.topic] && !confirmedTopics[item.topic] && (
                             <div className="mb-4 p-3 bg-gray-900/50 border border-gray-700 rounded-lg">
                               <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Manual Override</label>
-                              <div className="flex gap-2">
+                              <div className="flex gap-2 flex-wrap">
                                 <select
                                   value={manualOverrides[item.topic] || item.primaryTemplate || ""}
                                   onChange={(e) => setManualOverrides(prev => ({...prev, [item.topic]: e.target.value}))}
-                                  className="flex-1 bg-black/50 border border-gray-600 text-sm rounded-md p-2 text-white outline-none focus:ring-1 focus:ring-primary"
+                                  className="flex-1 min-w-[12rem] bg-black/50 border border-gray-600 text-sm rounded-md p-2 text-white outline-none focus:ring-1 focus:ring-primary"
                                 >
                                   {client.templates.map(t => (
                                     <option key={t.label} value={t.label}>{t.label}</option>
@@ -721,8 +1036,8 @@ export default function Home() {
                             <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Target Duration ({targetDuration}s)</label>
                             <input
                               type="range"
-                              min={client.duration.minSec}
-                              max={client.duration.maxSec}
+                              min={selectedPipeline?.duration.minSec ?? 15}
+                              max={selectedPipeline?.duration.maxSec ?? 90}
                               step="5"
                               value={targetDuration}
                               onChange={(e) => setTargetDuration(e.target.value)}
@@ -732,7 +1047,7 @@ export default function Home() {
 
                           <div className="mt-6 flex justify-end">
                             <button
-                              onClick={() => handleGenerateFullScript(false)}
+                              onClick={handleGenerateFullScript}
                               disabled={isGeneratingScript || !confirmedTopics[item.topic]}
                               className="w-full py-3 bg-primary hover:bg-primary-hover text-white rounded-lg font-bold flex justify-center items-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)]"
                             >
@@ -757,18 +1072,20 @@ export default function Home() {
 
       {/* STEP 2: SCRIPT EDITOR & CHAT */}
       {step === 2 && finalScript && (
-        <div className="glass-card p-8 animate-in fade-in slide-in-from-right-8 space-y-6">
-          <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+        <div className="glass-card p-6 sm:p-8 animate-in fade-in slide-in-from-right-8 space-y-6">
+          <div className="flex items-center justify-between gap-4 border-b border-gray-800 pb-4 flex-wrap">
             <div className="flex items-center gap-3">
               <Edit3 className="text-primary" />
-              <h2 className="text-2xl font-bold text-white">Review & Revise Script</h2>
+              <h2 className="text-2xl font-bold text-white">Review &amp; Revise Script</h2>
             </div>
-            <button
-              onClick={() => setStep(1)}
-              className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition-colors"
-            >
-              Back to Topics
-            </button>
+            {showTopic && (
+              <button
+                onClick={() => setStep(1)}
+                className="text-sm px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition-colors"
+              >
+                Back to Topics
+              </button>
+            )}
           </div>
 
           <div className="grid grid-cols-1 gap-8">
@@ -780,7 +1097,7 @@ export default function Home() {
                  onScriptUpdate={(newText) => setFinalScript({ ...finalScript, fullScript: newText })}
                />
                <div className="mt-8 pt-8 border-t border-gray-800">
-                 {hasStage("audio") ? (
+                 {showArchitect ? (
                    <button
                      onClick={async () => { await persistScriptEdits(); setStep(3); }}
                      className="w-full py-4 bg-primary hover:bg-primary-hover text-white rounded-xl font-bold text-lg flex justify-center items-center gap-2 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)]"
@@ -790,12 +1107,12 @@ export default function Home() {
                    </button>
                  ) : (
                    <div className="text-center space-y-4">
-                     <p className="text-green-400 font-semibold flex items-center justify-center gap-2"><UserCheck size={18}/> Script complete — this client&apos;s plan ends here.</p>
+                     <p className="text-green-400 font-semibold flex items-center justify-center gap-2"><UserCheck size={18}/> Script complete — this reel&apos;s pipeline ends here.</p>
                      <button
                        onClick={async () => { await persistScriptEdits(); backToHome(); }}
                        className="px-8 py-3 bg-white text-black hover:bg-gray-200 rounded-lg font-bold transition-colors shadow-lg"
                      >
-                       <Copy size={16} className="inline mr-2" />Save & Back to Reels
+                       <Copy size={16} className="inline mr-2" />Save &amp; Back to Reels
                      </button>
                    </div>
                  )}
@@ -806,9 +1123,9 @@ export default function Home() {
       )}
 
       {/* STEP 3: VIDEO ARCHITECT */}
-      {step === 3 && (
-        <div className="glass-card p-8 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-4xl mx-auto">
-          <div className="flex items-center justify-between border-b border-gray-800 pb-4">
+      {step === 3 && showArchitect && (
+        <div className="glass-card p-6 sm:p-8 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-4xl mx-auto">
+          <div className="flex items-center justify-between gap-4 border-b border-gray-800 pb-4 flex-wrap">
             <div className="flex items-center gap-3">
               <Settings className="text-primary" />
               <h2 className="text-2xl font-bold text-white">Video Architect Room</h2>
@@ -824,7 +1141,7 @@ export default function Home() {
           <div className="space-y-6">
             {hasStage("avatar") && client.avatars.length > 0 && (
               <div>
-                <h3 className="text-lg font-bold text-white mb-4">1. Choose Avatar Look</h3>
+                <h3 className="text-lg font-bold text-white mb-4">Choose Avatar Look</h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   {client.avatars.map(avatar => (
                     <div
@@ -834,12 +1151,27 @@ export default function Home() {
                     >
                       <div className={`w-16 h-16 mx-auto rounded-full mb-3 flex items-center justify-center overflow-hidden border-2 transition-all ${selectedAvatar === avatar.label ? 'border-primary' : 'border-indigo-900'}`}>
                         {avatar.previewImageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
                           <img src={avatar.previewImageUrl} alt={avatar.label} className="w-full h-full object-cover" />
                         ) : (
                           <UserCheck size={24} className="text-gray-500" />
                         )}
                       </div>
-                      <span className="font-semibold text-gray-200">{avatar.label}</span>
+                      <span className="font-semibold text-gray-200 text-sm break-words">{avatar.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {productUrls.length > 0 && (
+              <div>
+                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Package size={18} className="text-amber-300" /> Product Photos</h3>
+                <div className="flex flex-wrap gap-3">
+                  {productUrls.map((u, i) => (
+                    <div key={i} className="w-20 h-20 rounded-lg overflow-hidden border border-gray-700">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={u} alt={`Product ${i + 1}`} className="w-full h-full object-cover" />
                     </div>
                   ))}
                 </div>
@@ -849,13 +1181,13 @@ export default function Home() {
             {hasStage("broll_plan") && (
               <>
                 <div>
-                  <h3 className="text-lg font-bold text-white mb-4">2. B-Roll Frequency</h3>
-                  <div className="flex gap-4">
+                  <h3 className="text-lg font-bold text-white mb-4">B-Roll Frequency</h3>
+                  <div className="flex gap-3 sm:gap-4 flex-wrap">
                     {BROLL_OPTIONS.map(freq => (
                       <button
                         key={freq}
                         onClick={() => setBrollFrequency(freq)}
-                        className={`flex-1 py-3 rounded-lg border transition-all font-semibold ${brollFrequency === freq ? 'bg-primary text-white border-primary shadow-lg' : 'bg-gray-800/40 text-gray-400 border-gray-700 hover:border-gray-500'}`}
+                        className={`flex-1 min-w-[6rem] py-3 rounded-lg border transition-all font-semibold ${brollFrequency === freq ? 'bg-primary text-white border-primary shadow-lg' : 'bg-gray-800/40 text-gray-400 border-gray-700 hover:border-gray-500'}`}
                       >
                         {freq}
                       </button>
@@ -864,7 +1196,7 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <h3 className="text-lg font-bold text-white mb-4">3. Creative Director / Edit Instructions</h3>
+                  <h3 className="text-lg font-bold text-white mb-4">Creative Director / Edit Instructions</h3>
                   <textarea
                     value={editorInstructions}
                     onChange={(e) => setEditorInstructions(e.target.value)}
@@ -877,12 +1209,14 @@ export default function Home() {
 
             <div className="pt-6 border-t border-gray-800">
               <button
-                onClick={handleGenerateAudio}
-                disabled={isGeneratingAudio}
+                onClick={proceedFromArchitect}
+                disabled={isGeneratingAudio || isGeneratingVideoPipeline}
                 className="w-full py-4 bg-primary hover:bg-primary-hover text-white rounded-xl font-extrabold text-lg flex justify-center items-center gap-3 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)] disabled:opacity-50"
               >
-                {isGeneratingAudio ? <Loader2 className="animate-spin" size={20} /> : <Mic size={20} />}
-                {isGeneratingAudio ? "Directing Voice & Rendering Audio..." : "Generate Audio"}
+                {(isGeneratingAudio || isGeneratingVideoPipeline) ? <Loader2 className="animate-spin" size={20} /> : <Mic size={20} />}
+                {showAudio
+                  ? (isGeneratingAudio ? "Directing Voice & Rendering Audio..." : "Generate Audio")
+                  : (isGeneratingVideoPipeline ? "Planning Visuals (this takes a few mins)..." : "Continue to Assets")}
               </button>
             </div>
           </div>
@@ -890,11 +1224,11 @@ export default function Home() {
       )}
 
       {/* STEP 4: AUDIO READY */}
-      {step === 4 && (
-        <div className="glass-card p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-3xl mx-auto">
+      {step === 4 && showAudio && (
+        <div className="glass-card p-6 sm:p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-3xl mx-auto">
           <div className="text-center mb-8">
             <Mic size={48} className="text-green-400 mx-auto mb-4" />
-            <h2 className="text-3xl font-bold text-white">Audio & Blueprint Ready</h2>
+            <h2 className="text-3xl font-bold text-white">Audio &amp; Blueprint Ready</h2>
             <p className="text-gray-400 mt-2">{client.displayName}&apos;s voice has been generated.</p>
           </div>
 
@@ -911,11 +1245,12 @@ export default function Home() {
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
               <h4 className="text-white font-bold mb-4 flex items-center gap-2"><Video size={18}/> Video Architect Blueprint</h4>
               <ul className="text-sm text-gray-300 space-y-3 list-disc pl-4">
-                <li><strong>Topic:</strong> {finalScript?.topic || topic}</li>
+                <li className="break-words"><strong>Topic:</strong> {finalScript?.topic || topic}</li>
                 <li><strong>Target Duration:</strong> {targetDuration}s</li>
                 {hasStage("avatar") && <li><strong>Avatar Style:</strong> {selectedAvatar}</li>}
                 {hasStage("broll_plan") && <li><strong>B-Roll Frequency:</strong> {brollFrequency}</li>}
-                {hasStage("broll_plan") && <li><strong>Editor Notes:</strong> {editorInstructions || 'None'}</li>}
+                {hasStage("broll_plan") && <li className="break-words"><strong>Editor Notes:</strong> {editorInstructions || 'None'}</li>}
+                {productUrls.length > 0 && <li><strong>Product Photos:</strong> {productUrls.length}</li>}
               </ul>
             </div>
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 flex flex-col h-full">
@@ -927,7 +1262,7 @@ export default function Home() {
           </div>
 
           <div className="pt-6 border-t border-gray-800 space-y-4">
-            {(hasStage("avatar") || hasStage("broll_plan")) ? (
+            {showAssets ? (
               <button
                 onClick={handleGenerateVideoPipeline}
                 disabled={isGeneratingVideoPipeline}
@@ -938,7 +1273,7 @@ export default function Home() {
               </button>
             ) : (
               <p className="text-center text-green-400 font-semibold flex items-center justify-center gap-2">
-                <UserCheck size={18}/> Audio complete — this client&apos;s plan ends here.
+                <UserCheck size={18}/> Audio complete — this reel&apos;s pipeline ends here.
               </p>
             )}
             <div className="flex flex-col sm:flex-row justify-center gap-4">
@@ -960,8 +1295,8 @@ export default function Home() {
       )}
 
       {/* STEP 5: FINAL ASSETS */}
-      {step === 5 && (
-        <div className="glass-card p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-5xl mx-auto">
+      {step === 5 && showAssets && (
+        <div className="glass-card p-6 sm:p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-5xl mx-auto">
           <div className="text-center mb-8">
             <Sparkles size={48} className="text-purple-400 mx-auto mb-4" />
             <h2 className="text-3xl font-bold text-white">Production Assets Ready</h2>
@@ -970,7 +1305,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className={`grid grid-cols-1 ${hasStage("avatar") ? "md:grid-cols-2" : ""} gap-8`}>
             {hasStage("avatar") && (
               <div className="space-y-4">
                 <h3 className="text-xl font-bold text-white flex items-center gap-2"><UserCheck size={20}/> Avatar Output</h3>
@@ -986,13 +1321,20 @@ export default function Home() {
               <h3 className="text-xl font-bold text-white flex items-center gap-2"><Video size={20}/> Final Assembly</h3>
               {hasStage("broll_plan") && (
                 <>
-                  <p className="text-sm text-gray-400">Your blueprint is ready. The B-roll prompts below will be automatically generated in parallel and stitched over the avatar video.</p>
+                  <p className="text-sm text-gray-400">
+                    {hasStage("avatar")
+                      ? "Your blueprint is ready. The B-roll prompts below will be generated in parallel and stitched over the avatar video."
+                      : "Your blueprint is ready. These clips will be generated and stitched together into the finished reel."}
+                  </p>
                   <div className="space-y-4 my-4 max-h-96 overflow-y-auto pr-2">
                     {(Array.isArray(brollPlan) ? brollPlan : (brollPlan?.broll || [])).map((b: any, i: number) => (
                       <div key={i} className="bg-gray-800 p-4 rounded-lg border border-gray-700">
-                        <p className="text-sm text-primary font-bold mb-1">Clip {i + 1} (Starts {b.start_second || b.start}s)</p>
+                        <p className="text-sm text-primary font-bold mb-1">
+                          Clip {i + 1} (Starts {b.start_second ?? b.start ?? 0}s)
+                          {b.media_type === "product_image" && <span className="ml-2 text-amber-300 text-xs">product photo</span>}
+                        </p>
                         <div className="flex gap-2">
-                          <p className="text-xs text-gray-300 bg-black/50 p-2 rounded flex-1">{b.veo_prompt || b.prompt}</p>
+                          <p className="text-xs text-gray-300 bg-black/50 p-2 rounded flex-1 break-words">{b.veo_prompt || b.prompt || b.scene}</p>
                         </div>
                       </div>
                     ))}
@@ -1000,10 +1342,10 @@ export default function Home() {
                 </>
               )}
 
-              {hasStage("assemble") ? (
+              {showFinal ? (
                 <button
                   onClick={handleAssembleFinalVideo}
-                  disabled={isAssembling || !avatarVideoUrl}
+                  disabled={isAssembling || (hasStage("avatar") ? !avatarVideoUrl : !brollPlan)}
                   className="w-full py-6 bg-green-600 hover:bg-green-500 text-white rounded-xl font-extrabold text-xl flex justify-center items-center gap-3 transition-all shadow-[0_0_20px_rgba(22,163,74,0.4)] disabled:opacity-50 mt-4"
                 >
                   {isAssembling ? <Loader2 className="animate-spin" size={24} /> : <Video size={24} />}
@@ -1011,18 +1353,18 @@ export default function Home() {
                 </button>
               ) : (
                 <p className="text-center text-green-400 font-semibold flex items-center justify-center gap-2 mt-4">
-                  <UserCheck size={18}/> Assets complete — this client&apos;s plan ends here.
+                  <UserCheck size={18}/> Assets complete — this reel&apos;s pipeline ends here.
                 </p>
               )}
             </div>
           </div>
 
-          <div className="text-center mt-8 pt-6 border-t border-gray-800 flex justify-center gap-4">
+          <div className="text-center mt-8 pt-6 border-t border-gray-800 flex justify-center gap-4 flex-wrap">
             <button
-              onClick={() => setStep(4)}
+              onClick={() => setStep(showAudio ? 4 : 3)}
               className="px-8 py-3 bg-gray-800 text-white hover:bg-gray-700 rounded-lg font-bold transition-colors"
             >
-              Back to Audio Room
+              {showAudio ? "Back to Audio Room" : "Back to Architect Room"}
             </button>
             <button
               onClick={backToHome}
@@ -1035,12 +1377,12 @@ export default function Home() {
       )}
 
       {/* STEP 6: FINAL ASSEMBLED VIDEO */}
-      {step === 6 && (
-        <div className="glass-card p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-3xl mx-auto">
+      {step === 6 && showFinal && (
+        <div className="glass-card p-6 sm:p-12 animate-in fade-in slide-in-from-right-8 space-y-8 max-w-3xl mx-auto">
           <div className="text-center mb-8">
             <Sparkles size={48} className="text-green-400 mx-auto mb-4" />
             <h2 className="text-3xl font-bold text-white">Final Video Ready</h2>
-            <p className="text-gray-400 mt-2">B-rolls and Avatar perfectly stitched.</p>
+            <p className="text-gray-400 mt-2">{hasStage("avatar") ? "B-rolls and Avatar perfectly stitched." : "Your clips are stitched into the finished reel."}</p>
           </div>
 
           <div className="space-y-4">
@@ -1051,7 +1393,7 @@ export default function Home() {
             )}
           </div>
 
-          <div className="text-center mt-8 pt-6 border-t border-gray-800 flex justify-center gap-4">
+          <div className="text-center mt-8 pt-6 border-t border-gray-800 flex justify-center gap-4 flex-wrap">
             <button
               onClick={() => setStep(5)}
               className="px-8 py-3 bg-gray-800 text-white hover:bg-gray-700 rounded-lg font-bold transition-colors"
@@ -1082,7 +1424,7 @@ export default function Home() {
             {previewTemplateModal === "Auto" ? (
               <>
                 <h3 className="text-2xl font-bold text-white mb-2">AI Template Gallery</h3>
-                <p className="text-sm text-gray-400 mb-8">Because you selected <strong>Auto</strong>, the AI will evaluate the topic and automatically choose the highest converting format from the options below:</p>
+                <p className="text-sm text-gray-400 mb-8 pr-10">Because you selected <strong>Auto</strong>, the AI will evaluate the topic and automatically choose the highest converting format from the options below:</p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   {client.templates.map((t) => (
                     <div key={t.label} className="bg-black/40 border border-gray-800 rounded-xl p-4 flex flex-col">
@@ -1101,7 +1443,7 @@ export default function Home() {
               </>
             ) : templatesByLabel[previewTemplateModal] ? (
               <>
-                <h3 className="text-xl font-bold text-white mb-2">{previewTemplateModal} Example</h3>
+                <h3 className="text-xl font-bold text-white mb-2 pr-10">{previewTemplateModal} Example</h3>
                 <p className="text-sm text-gray-400 mb-6">{templatesByLabel[previewTemplateModal].description}</p>
 
                 {templatesByLabel[previewTemplateModal].previewVideoUrl ? (

@@ -19,7 +19,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (error) throw new Error(error.message);
     if (!client) return NextResponse.json({ error: 'Client not found' }, { status: 404 });
 
-    const path = (client as any)[meta.column] || `${id}/${meta.filename}`;
+    const path = (client as any)[meta.column] || `${(client as any).slug}/${meta.filename}`;
     const dl = await supabase.storage.from(KB_BUCKET).download(path);
     const content = dl.error ? '' : await dl.data.text();
 
@@ -49,12 +49,13 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     if (error) throw new Error(error.message);
     if (!client) return NextResponse.json({ error: 'Client not found' }, { status: 404 });
 
-    const livePath = (client as any)[meta.column] || `${id}/${meta.filename}`;
+    const slug = (client as any).slug;
+    const livePath = (client as any)[meta.column] || `${slug}/${meta.filename}`;
     const buf = Buffer.from(content, 'utf-8');
 
     // 1. Timestamped backup of the NEW version (append-only history)
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupPath = `${id}/history/${meta.filename}.${stamp}`;
+    const backupPath = `${slug}/history/${meta.filename}.${stamp}`;
     const backup = await supabase.storage.from(KB_BUCKET).upload(backupPath, buf, { contentType: 'text/markdown' });
     if (backup.error) throw new Error(`Backup failed: ${backup.error.message}`);
 

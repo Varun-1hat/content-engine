@@ -105,21 +105,21 @@ export default function ScriptDisplay({ clientId, jobId, script, onScriptUpdate 
   };
 
   const handleAutoEnhance = () => {
-    callReviseAPI("Please auto-enhance this script. Make it more punchy, engaging, and viral. Keep all the medical facts perfectly intact. Ensure emotion markers are placed well.");
+    callReviseAPI("Please auto-enhance this script. Make it more punchy, engaging, and viral. Keep every fact and claim perfectly intact. Ensure emotion markers are placed well.");
   };
 
   return (
     <div className="w-full mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-4">
-        <div>
+        <div className="min-w-0">
           <h2 className="text-2xl font-bold gradient-text">Script Editor</h2>
-          <div className="flex gap-4 mt-2 text-sm text-gray-400">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-400">
             <span><strong>Words:</strong> {script.wordCount}</span>
             <span><strong>Duration:</strong> {script.estimatedDuration}</span>
-            <span><strong>Template:</strong> {script.template}</span>
+            <span className="break-words"><strong>Template:</strong> {script.template}</span>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleUndo}
             disabled={historyIndex === 0}

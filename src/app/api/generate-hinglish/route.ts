@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
-import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
+import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 
 // POST /api/generate-hinglish — the voice-adaptation stage ('adapt_voice').
 // Route name is legacy; the client's voice prompt (KB) defines the target
@@ -16,18 +16,21 @@ export async function POST(req: Request) {
     jobId = body.jobId;
 
     if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
-    if (jobId) {
-      const jobForbidden = await jobClientMismatch(jobId, clientId);
-      if (jobForbidden) return jobForbidden;
-    }
+
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (job.client_id !== clientId) return NextResponse.json({ error: 'Job does not belong to this client' }, { status: 403 });
+    const offPlan = stageNotInPlan(job, 'adapt_voice');
+    if (offPlan) return offPlan;
     if (!englishScript) return NextResponse.json({ error: 'English Script is required' }, { status: 400 });
 
     const c = await loadClientConfig(clientId);
-    if (jobId) await startStage(jobId, 'adapt_voice');
+    await startStage(jobId, 'adapt_voice');
 
     const prompt = `${c.voicePrompt}
 
@@ -48,13 +51,11 @@ Output strictly valid JSON only, exactly matching the required output format def
     });
     const script = extractJson<Record<string, unknown> & { fullScript?: string }>(raw);
 
-    if (jobId) {
-      const { fullScript, ...meta } = script;
-      await completeStage(jobId, 'adapt_voice', {
-        full_script: fullScript ?? null,
-        script_meta: meta,
-      });
-    }
+    const { fullScript, ...meta } = script;
+    await completeStage(jobId, 'adapt_voice', {
+      full_script: fullScript ?? null,
+      script_meta: meta,
+    });
 
     return NextResponse.json({ success: true, script });
   } catch (error: any) {

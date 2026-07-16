@@ -1,64 +1,147 @@
-import type { ClientConfig, Tier } from '../clients/types';
+import type { ClientPipeline } from '../clients/types';
 
 // The stage registry: THE single place the pipeline shape is defined.
-// UI steppers, route guards, and job progression all derive from getStagePlan().
-// Skipping a step for a client is a config question (tier / content_type /
-// locale / avatar rows), never a code change.
+// UI steppers, route guards, and job progression all derive from a stage plan.
+//
+// Two axes decide which stages run for a given reel:
+//   1. The client's PIPELINE (admin-configured) — its `enabled_stages` subset.
+//      This is where the client "variants" live (full E2E, product-only, …).
+//   2. Per-REEL toggles at creation (voiceover on/off, inject-script) — applied
+//      by resolveReelStages() and snapshotted into jobs.stage_plan.
+// Skipping a stage is always a config/data question, never a code change.
 
 export type StageName =
   | 'topic'       // suggest + pick a topic
-  | 'script'      // English script generation
-  | 'adapt_voice' // adapt into the client's voice/language (e.g. Hinglish)
+  | 'script'      // English/base script generation
+  | 'adapt_voice' // adapt/optimize into the client's voice + language
   | 'audio'       // TTS + normalize + upload
-  | 'avatar'      // talking-head render
+  | 'avatar'      // talking-head render (lip-synced to the audio track)
   | 'broll_plan'  // creative-director B-roll timeline
   | 'assemble';   // generate clips + stitch final video
 
 export const STAGE_INFO: Record<StageName, { label: string }> = {
   topic: { label: 'Topic' },
   script: { label: 'Script' },
-  adapt_voice: { label: 'Voice Adapt' },
+  adapt_voice: { label: 'Adapt Script' },
   audio: { label: 'Audio' },
   avatar: { label: 'Avatar' },
   broll_plan: { label: 'B-Roll Plan' },
   assemble: { label: 'Assemble' },
 };
 
-const FULL_ORDER: StageName[] = ['topic', 'script', 'adapt_voice', 'audio', 'avatar', 'broll_plan', 'assemble'];
+export const CANONICAL_STAGES: StageName[] = [
+  'topic', 'script', 'adapt_voice', 'audio', 'avatar', 'broll_plan', 'assemble',
+];
 
-// The last pipeline stage included in each tier.
-const TIER_LAST_STAGE: Record<Tier, StageName> = {
-  script_only: 'adapt_voice',
-  audio_only: 'audio',
-  avatar_only: 'avatar',
-  full_production: 'assemble',
-  scenario_premium: 'assemble',
-};
+const STAGE_SET = new Set<string>(CANONICAL_STAGES);
 
-export function getStagePlan(
-  client: Pick<ClientConfig, 'tier' | 'contentType' | 'scriptMode' | 'locale' | 'avatars'>
-): StageName[] {
-  let plan = [...FULL_ORDER];
-
-  // 'polish' clients bring their own draft — no topic-discovery step.
-  if (client.scriptMode === 'polish') plan = plan.filter((s) => s !== 'topic');
-
-  // Plain-English clients need no voice-adaptation pass.
-  if (client.locale.language === 'english') plan = plan.filter((s) => s !== 'adapt_voice');
-
-  // No talking head: product/visual content, or a client with zero avatar rows.
-  // Assembly currently requires an avatar base video to overlay onto, so it is
-  // dropped too — the plan must never promise a stage the pipeline can't run.
-  // (broll_plan stays: it's a standalone deliverable. A b-roll-only assembly
-  // path is a future assembly feature; re-enable here when it exists.)
-  if (client.contentType === 'product_visual' || client.avatars.length === 0) {
-    plan = plan.filter((s) => s !== 'avatar' && s !== 'assemble');
+/** Keep only known stages, dedupe, and sort into canonical order. */
+export function normalizeStages(names: readonly string[]): StageName[] {
+  const seen = new Set<StageName>();
+  for (const n of names) {
+    if (STAGE_SET.has(n)) seen.add(n as StageName);
   }
+  return CANONICAL_STAGES.filter((s) => seen.has(s));
+}
 
-  // Cut at the tier's last stage (compare against FULL_ORDER, since the
-  // tier's nominal last stage may itself have been filtered out above).
-  const cutoff = FULL_ORDER.indexOf(TIER_LAST_STAGE[client.tier]);
-  return plan.filter((s) => FULL_ORDER.indexOf(s) <= cutoff);
+/**
+ * Structural validity of a stage set. Returns human-readable errors (empty = OK).
+ * Enforced when an admin saves a pipeline AND when a job's plan is resolved.
+ */
+export function validate(names: readonly string[]): string[] {
+  const errors: string[] = [];
+  const unknown = names.filter((n) => !STAGE_SET.has(n));
+  if (unknown.length) errors.push(`Unknown stage(s): ${unknown.join(', ')}`);
+
+  const stages = normalizeStages(names);
+  if (stages.length === 0) {
+    errors.push('A pipeline must enable at least one stage.');
+    return errors;
+  }
+  const has = (s: StageName) => stages.includes(s);
+
+  // Avatar is lip-synced to the audio track — it needs one.
+  if (has('avatar') && !has('audio')) {
+    errors.push('The avatar stage requires the audio stage (the talking head is lip-synced to the audio).');
+  }
+  // Assembly overlays/stitches onto an avatar base OR concatenates B-roll — it
+  // needs at least one visual source.
+  if (has('assemble') && !has('avatar') && !has('broll_plan')) {
+    errors.push('The assemble stage requires either the avatar stage or the B-roll plan stage (nothing to assemble otherwise).');
+  }
+  return errors;
+}
+
+// Preset definitions that prefill the admin toggle editor. Storage is always
+// the raw `enabled_stages` set — presets are a convenience, not a type.
+export interface PipelinePreset {
+  key: string;
+  label: string;
+  stages: StageName[];
+  productInput: boolean;
+}
+
+export const PIPELINE_PRESETS: PipelinePreset[] = [
+  {
+    key: 'full_e2e',
+    label: 'Full E2E (script → avatar + voice → b-roll)',
+    stages: ['topic', 'script', 'adapt_voice', 'audio', 'avatar', 'broll_plan', 'assemble'],
+    productInput: false,
+  },
+  {
+    key: 'client_script',
+    label: 'Client-supplied script (optimize → avatar + voice → b-roll)',
+    stages: ['adapt_voice', 'audio', 'avatar', 'broll_plan', 'assemble'],
+    productInput: false,
+  },
+  {
+    key: 'avatar_product',
+    label: 'Avatar + product',
+    stages: ['topic', 'script', 'adapt_voice', 'audio', 'avatar', 'broll_plan', 'assemble'],
+    productInput: true,
+  },
+  {
+    key: 'product_promo',
+    label: 'Product only (no avatar, with voiceover)',
+    stages: ['topic', 'script', 'adapt_voice', 'audio', 'broll_plan', 'assemble'],
+    productInput: true,
+  },
+  {
+    key: 'product_music',
+    label: 'Product ad, no voiceover (video + music)',
+    stages: ['topic', 'script', 'broll_plan', 'assemble'],
+    productInput: true,
+  },
+];
+
+/** A pipeline's ordered stage list. */
+export function getStagePlan(pipeline: Pick<ClientPipeline, 'enabled_stages'>): StageName[] {
+  return normalizeStages(pipeline.enabled_stages);
+}
+
+/** A job's snapshotted stage plan; empty/missing falls back to the full sequence. */
+export function getJobStagePlan(job: { stage_plan?: string[] | null }): StageName[] {
+  const plan = normalizeStages(job.stage_plan ?? []);
+  return plan.length > 0 ? plan : [...CANONICAL_STAGES];
+}
+
+/**
+ * Apply per-reel choices to a pipeline's stage set:
+ *   - voiceover=false  → drop adapt_voice, audio, and avatar (avatar needs audio).
+ *   - injectScript=true → drop topic and script (the user supplies the script).
+ */
+export function resolveReelStages(
+  pipelineStages: readonly string[],
+  opts: { voiceover?: boolean; injectScript?: boolean } = {}
+): StageName[] {
+  let stages = normalizeStages(pipelineStages);
+  if (opts.voiceover === false) {
+    stages = stages.filter((s) => s !== 'adapt_voice' && s !== 'audio' && s !== 'avatar');
+  }
+  if (opts.injectScript) {
+    stages = stages.filter((s) => s !== 'topic' && s !== 'script');
+  }
+  return stages;
 }
 
 export function nextStage(plan: StageName[], current: StageName): StageName | null {
@@ -67,6 +150,6 @@ export function nextStage(plan: StageName[], current: StageName): StageName | nu
   return plan[idx + 1];
 }
 
-export function isStageInPlan(plan: StageName[], stage: StageName): boolean {
+export function isStageInPlan(plan: readonly StageName[], stage: StageName): boolean {
   return plan.includes(stage);
 }

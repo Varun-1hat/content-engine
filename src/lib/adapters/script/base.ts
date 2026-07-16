@@ -15,7 +15,18 @@
 //     still run the result through extractJson() (index.ts) as a safety net.
 //   - Return the raw response text. No parsing, no trimming beyond the
 //     provider's own artifacts.
+//   - When opts.images is set, the model MUST actually receive them. A provider
+//     that cannot accept image input must THROW, not silently drop them — a
+//     prompt that describes attached photos to a blind model produces confident
+//     fiction about a product nobody uploaded.
 // =============================================================================
+
+/** An image supplied to the model as inline data (product photos, references). */
+export interface ScriptImageInput {
+  /** Raw base64 (no data: prefix). */
+  base64: string;
+  mimeType: string;
+}
 
 export interface ScriptGenerateOptions {
   prompt: string;
@@ -24,6 +35,8 @@ export interface ScriptGenerateOptions {
   fallbackModel?: string;
   /** Ask the provider for native JSON output (no markdown fences). */
   json?: boolean;
+  /** Images the model must see alongside the prompt. */
+  images?: ScriptImageInput[];
 }
 
 export interface ScriptAdapter {

@@ -13,14 +13,19 @@ export async function GET(req: Request) {
 
     let query = supabaseAdmin()
       .from('jobs')
-      .select('*')
+      .select('*, clients(display_name), client_pipelines(name)')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (clientId) query = query.eq('client_id', clientId);
 
     const { data, error } = await query;
     if (error) throw new Error(error.message);
-    return NextResponse.json({ jobs: data ?? [] });
+    const jobs = (data ?? []).map((j: any) => ({
+      ...j,
+      client_name: j.clients?.display_name ?? null,
+      pipeline_name: j.client_pipelines?.name ?? null,
+    }));
+    return NextResponse.json({ jobs });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

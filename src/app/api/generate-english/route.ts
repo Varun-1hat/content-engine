@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
-import { getStagePlan } from '@/lib/pipeline/stages';
-import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
+import { getJobStagePlan } from '@/lib/pipeline/stages';
+import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
+import { productBlock, fetchProductImages } from '@/lib/pipeline/product';
 
 // POST /api/generate-english
 // Body: { clientId, topic, forceTemplate?, targetDuration?, revisionNotes?, jobId? }
@@ -15,23 +16,26 @@ export async function POST(req: Request) {
     jobId = body.jobId;
 
     if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
-    if (jobId) {
-      const jobForbidden = await jobClientMismatch(jobId, clientId);
-      if (jobForbidden) return jobForbidden;
-    }
+
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (job.client_id !== clientId) return NextResponse.json({ error: 'Job does not belong to this client' }, { status: 403 });
+    const offPlan = stageNotInPlan(job, 'script');
+    if (offPlan) return offPlan;
     if (!topic) return NextResponse.json({ error: 'Topic is required' }, { status: 400 });
 
     const c = await loadClientConfig(clientId);
-    if (jobId) await startStage(jobId, 'script');
+    await startStage(jobId, 'script');
 
     const durationNum = targetDuration ? parseInt(targetDuration) : 45;
     const targetWordCount = Math.round(durationNum * c.speechWordsPerSec);
 
-    const prompt = `${c.researchDoc}
+    const prompt = `${c.researchDoc}${productBlock(job)}
 
 === TASK ===
 You are an expert scriptwriter for short-form videos.
@@ -62,22 +66,21 @@ Return ONLY a strictly valid JSON object matching this exact structure (do NOT w
       model: c.script.model,
       fallbackModel: c.script.fallbackModel,
       json: true,
+      images: await fetchProductImages(job),
     });
     const parsed = extractJson<{ chosenTemplate: string; reasoning: string; englishScript: string }>(raw);
 
-    if (jobId) {
-      // When the client's plan has no voice-adaptation stage (English-language
-      // clients), the English script IS the final script — persist it so the
-      // audio stage and resume work without an adapt_voice pass.
-      const skipsVoiceAdapt = !getStagePlan(c).includes('adapt_voice');
-      await completeStage(jobId, 'script', {
-        topic,
-        template: parsed.chosenTemplate,
-        target_duration_sec: durationNum,
-        english_script: parsed.englishScript,
-        ...(skipsVoiceAdapt ? { full_script: parsed.englishScript } : {}),
-      });
-    }
+    // When this reel's plan has no voice-adaptation stage (English clients, or a
+    // per-reel no-voiceover choice), the English script IS the final script —
+    // persist it so downstream stages and resume work without an adapt_voice pass.
+    const skipsVoiceAdapt = !getJobStagePlan(job).includes('adapt_voice');
+    await completeStage(jobId, 'script', {
+      topic,
+      template: parsed.chosenTemplate,
+      target_duration_sec: durationNum,
+      english_script: parsed.englishScript,
+      ...(skipsVoiceAdapt ? { full_script: parsed.englishScript } : {}),
+    });
 
     return NextResponse.json({
       success: true,

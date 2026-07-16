@@ -2,40 +2,46 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { getJob, stageNotInPlan } from '@/lib/jobs';
+import { productBlock, fetchProductImages } from '@/lib/pipeline/product';
 
-// GET /api/generate-topic?client=<id>&query=<optional focus>
+// POST /api/generate-topic
+// Body: { clientId, jobId, query? }
 // Content, persona, and topic-selection rules come from the client's research
 // doc (KB). This route owns only the task framing and the output contract.
-export async function GET(req: Request) {
+// Seasonality/region context lives in the research doc (no locale_region column).
+export async function POST(req: Request) {
   try {
-    const url = new URL(req.url);
-    const clientId = url.searchParams.get('client');
-    if (!clientId) {
-      return NextResponse.json({ error: '?client= is required' }, { status: 400 });
-    }
+    const body = await req.json();
+    const { clientId, jobId, query } = body;
+
+    if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
 
-    const query = url.searchParams.get('query') || '';
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (job.client_id !== clientId) return NextResponse.json({ error: 'Job does not belong to this client' }, { status: 403 });
+    const offPlan = stageNotInPlan(job, 'topic');
+    if (offPlan) return offPlan;
 
     const c = await loadClientConfig(clientId);
     const currentMonth = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    const regionName =
-      new Intl.DisplayNames(['en'], { type: 'region' }).of(c.locale.region) ?? c.locale.region;
 
     const pastContentBlock = c.pastContent.trim()
       ? `\n\n=== PREVIOUSLY PUBLISHED (avoid repeating these topics/angles) ===\n${c.pastContent}`
       : '';
 
-    const prompt = `${c.researchDoc}${pastContentBlock}
+    const prompt = `${c.researchDoc}${pastContentBlock}${productBlock(job)}
 
 === TASK ===
-Based on the research document above and the current date/season in ${regionName} (${currentMonth}), generate 3 highly viral reel topics for ${c.displayName}.
-${query
+Based on the research document above and the current date/season (${currentMonth}), generate 3 highly viral reel topics for ${c.displayName}.
+${(query as string)?.trim()
   ? `The user is interested in the broad topic: "${query}". Generate 3 specific, highly viral angles/hooks specifically related to this topic.`
-  : `Pick topics that are most relevant to the current season in ${regionName} or universally highly viral (e.g., safety warnings).`}
+  : `Pick topics that are most relevant to the current season/date context in the research document or universally highly viral (e.g., safety warnings).`}
 
 CRITICAL STEP: For EACH topic, follow the topic-selection rules in the research document exactly (topic analysis, template decision tree, mixed-template check, hook & close extraction).
 
@@ -70,6 +76,7 @@ Output Format:
       model: c.script.structuredModel,
       fallbackModel: c.script.fallbackModel,
       json: true,
+      images: await fetchProductImages(job),
     });
 
     const topics = extractJson<unknown[]>(raw);

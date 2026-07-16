@@ -1,5 +1,12 @@
 # Modular Pipeline Refactor — Final Spec
 
+> **SUPERSEDED (2026-07-16) — historical record only.** The v2 stage-toggle model in
+> `to_be_executed.md` (repo root) replaced this design and is live. Specifically:
+> `tier`, `content_type`, `script_mode` and `locale_region` **no longer exist** (dropped in
+> migration 0004) — which stages run is now per-client `client_pipelines.enabled_stages`
+> plus a per-reel `jobs.stage_plan` snapshot. `clients.id` is a **uuid** with a separate
+> human-readable `slug`. Read this file for the v1 audit/history; do not follow its schema.
+
 Grounded in the actual code (audited 2026-07-14). §0–3 = the audit (what exists, what's broken, what varies per client). §4+ = the frozen design. **Design freeze note:** after running the two migrations in §5, the schema does not get restructured again — every anticipated axis of variation (vendor, model, language, tier, content shape, avatar count, template set) has a home. Future needs can only *add* columns/tables, which is non-breaking; nothing existing gets reshaped.
 
 ---

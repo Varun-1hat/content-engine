@@ -10,10 +10,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   try {
     const { id } = await params;
     const supabase = supabaseAdmin();
-    const [clientRes, avatarRes, templateRes] = await Promise.all([
+    const [clientRes, avatarRes, templateRes, pipelineRes] = await Promise.all([
       supabase.from('clients').select('*').eq('id', id).maybeSingle(),
       supabase.from('client_avatars').select('*').eq('client_id', id).order('sort_order'),
       supabase.from('client_templates').select('*').eq('client_id', id).order('sort_order'),
+      supabase.from('client_pipelines').select('*').eq('client_id', id).order('sort_order'),
     ]);
     if (clientRes.error) throw new Error(clientRes.error.message);
     if (!clientRes.data) return NextResponse.json({ error: 'Client not found' }, { status: 404 });
@@ -22,6 +23,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       client: clientRes.data,
       avatars: avatarRes.data ?? [],
       templates: templateRes.data ?? [],
+      pipelines: pipelineRes.data ?? [],
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });

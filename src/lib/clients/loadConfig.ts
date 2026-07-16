@@ -17,15 +17,13 @@ export function supabaseAdmin(): SupabaseClient {
   return createClient(url, key);
 }
 
-function mapRow(row: any, avatarRows: any[], templateRows: any[]): ClientConfig {
+function mapRow(row: any, avatarRows: any[], templateRows: any[], pipelineRows: any[]): ClientConfig {
   return {
     id: row.id,
+    slug: row.slug,
     displayName: row.display_name,
-    contentType: row.content_type,
-    scriptMode: row.script_mode,
-    tier: row.tier,
     active: row.active,
-    locale: { language: row.locale_language, region: row.locale_region },
+    locale: { language: row.locale_language },
     speechWordsPerSec: Number(row.speech_words_per_sec),
     knowledgeBase: {
       researchDocPath: row.kb_research_doc_path ?? undefined,
@@ -60,6 +58,17 @@ function mapRow(row: any, avatarRows: any[], templateRows: any[]): ClientConfig 
       preview_video_url: t.preview_video_url,
       sort_order: t.sort_order,
     })),
+    pipelines: pipelineRows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      enabled_stages: p.enabled_stages ?? [],
+      product_input: p.product_input,
+      duration_min_sec: p.duration_min_sec,
+      duration_max_sec: p.duration_max_sec,
+      duration_default_sec: p.duration_default_sec,
+      sort_order: p.sort_order,
+      active: p.active,
+    })),
     visual: { provider: row.visual_provider, stylePreset: row.visual_style_preset },
     storage: { provider: row.storage_provider, folderPrefix: row.storage_folder_prefix },
     extra: row.extra ?? {},
@@ -69,7 +78,20 @@ function mapRow(row: any, avatarRows: any[], templateRows: any[]): ClientConfig 
 async function downloadText(supabase: SupabaseClient, path?: string): Promise<string> {
   if (!path) return '';
   const { data, error } = await supabase.storage.from(KB_BUCKET).download(path);
-  if (error) throw new Error(`Failed to load KB doc "${path}": ${error.message}`);
+  if (error) {
+    // A KB doc that hasn't been written yet is an EMPTY doc, not a failure:
+    // onboarding sets the kb_*_path columns when the client is created, but the
+    // files only exist once someone saves them in the admin KB editor. Hard
+    // failing here would make every freshly-created client unloadable. The
+    // readiness check surfaces empty docs as warnings instead.
+    // Genuine storage errors (auth, network) still throw — a silent empty
+    // prompt would quietly wreck generation quality.
+    if (/not.?found/i.test(error.message)) {
+      console.warn(`KB doc "${path}" does not exist yet — treating as empty.`);
+      return '';
+    }
+    throw new Error(`Failed to load KB doc "${path}": ${error.message}`);
+  }
   return await data.text();
 }
 
@@ -78,10 +100,11 @@ export async function loadClientConfig(clientId: string): Promise<ResolvedClient
   if (cached && cached.expiresAt > Date.now()) return cached.data;
 
   const supabase = supabaseAdmin();
-  const [clientRes, avatarRes, templateRes] = await Promise.all([
+  const [clientRes, avatarRes, templateRes, pipelineRes] = await Promise.all([
     supabase.from('clients').select('*').eq('id', clientId).eq('active', true).single(),
     supabase.from('client_avatars').select('*').eq('client_id', clientId).order('sort_order'),
     supabase.from('client_templates').select('*').eq('client_id', clientId).order('sort_order'),
+    supabase.from('client_pipelines').select('*').eq('client_id', clientId).eq('active', true).order('sort_order'),
   ]);
 
   if (clientRes.error || !clientRes.data) {
@@ -89,8 +112,9 @@ export async function loadClientConfig(clientId: string): Promise<ResolvedClient
   }
   if (avatarRes.error) throw new Error(`Failed to load avatars for "${clientId}": ${avatarRes.error.message}`);
   if (templateRes.error) throw new Error(`Failed to load templates for "${clientId}": ${templateRes.error.message}`);
+  if (pipelineRes.error) throw new Error(`Failed to load pipelines for "${clientId}": ${pipelineRes.error.message}`);
 
-  const config = mapRow(clientRes.data, avatarRes.data ?? [], templateRes.data ?? []);
+  const config = mapRow(clientRes.data, avatarRes.data ?? [], templateRes.data ?? [], pipelineRes.data ?? []);
   const [researchDoc, voicePrompt, creativeDirectorPrompt, pastContent] = await Promise.all([
     downloadText(supabase, config.knowledgeBase.researchDocPath),
     downloadText(supabase, config.knowledgeBase.voicePromptPath),

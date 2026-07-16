@@ -19,6 +19,9 @@
 export interface AvatarRenderOptions {
   avatarId: string;
   audioUrl: string;
+  // Per-reel product photos to feature in the render (variant: avatar + product).
+  // Optional — omitted for plain talking-head reels (no behaviour change).
+  attachmentImageUrls?: string[];
   onSubmitted?: (providerJobId: string) => void | Promise<void>;
 }
 

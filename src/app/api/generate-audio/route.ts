@@ -7,7 +7,7 @@ import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getVoiceAdapter } from '@/lib/adapters/voice';
 import { getStorageAdapter } from '@/lib/adapters/storage';
 import { prepareScriptForTts, alignmentToSentenceTimestamps, normalizeAudio } from '@/lib/pipeline/audio';
-import { startStage, completeStage, failStage, jobClientMismatch } from '@/lib/jobs';
+import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 
 // POST /api/generate-audio — TTS + normalize + upload ('audio' stage).
 // Body: { clientId, text, globalSpeed?, jobId? }
@@ -21,18 +21,21 @@ export async function POST(req: Request) {
     const globalSpeed = parseFloat(body.globalSpeed) || 1.0;
 
     if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
-    if (jobId) {
-      const jobForbidden = await jobClientMismatch(jobId, clientId);
-      if (jobForbidden) return jobForbidden;
-    }
+
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (job.client_id !== clientId) return NextResponse.json({ error: 'Job does not belong to this client' }, { status: 403 });
+    const offPlan = stageNotInPlan(job, 'audio');
+    if (offPlan) return offPlan;
     if (!text) return NextResponse.json({ error: 'Text is required' }, { status: 400 });
 
     const c = await loadClientConfig(clientId);
-    if (jobId) await startStage(jobId, 'audio');
+    await startStage(jobId, 'audio');
 
     const prepared = prepareScriptForTts(text);
 
@@ -50,19 +53,17 @@ export async function POST(req: Request) {
     fs.writeFileSync(rawMp3Path, Buffer.from(audioBase64, 'base64'));
     await normalizeAudio(rawMp3Path, finalMp3Path, globalSpeed);
 
-    const folderPrefix = c.storage.folderPrefix || c.id;
+    const folderPrefix = c.storage.folderPrefix || c.slug;
     const audioUrl = await getStorageAdapter(c.storage.provider).upload(
       fs.readFileSync(finalMp3Path),
       { folder: `${folderPrefix}/audio`, resourceType: 'video' }
     );
 
-    if (jobId) {
-      await completeStage(jobId, 'audio', {
-        audio_url: audioUrl,
-        audio_timestamps: timestamps,
-        speech_speed: globalSpeed,
-      });
-    }
+    await completeStage(jobId, 'audio', {
+      audio_url: audioUrl,
+      audio_timestamps: timestamps,
+      speech_speed: globalSpeed,
+    });
 
     return NextResponse.json({ success: true, audioUrl, timestamps });
   } catch (error: any) {

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from './clients/loadConfig';
-import type { StageName } from './pipeline/stages';
+import { getJobStagePlan, resolveReelStages, validate, type StageName } from './pipeline/stages';
 
 // Job persistence: one row per reel, artifacts written as each stage completes.
 // The browser holds a job id, never the artifacts — refresh/resume is free.
@@ -10,6 +10,8 @@ export type StageStatus = 'pending' | 'running' | 'done' | 'failed';
 export interface JobRow {
   id: string;
   client_id: string;
+  pipeline_id: string | null;
+  stage_plan: string[] | null;
   current_stage: StageName;
   stage_status: StageStatus;
   created_by: string | null;
@@ -23,6 +25,7 @@ export interface JobRow {
   broll_frequency: string | null;
   editor_notes: string | null;
   speech_speed: number | null;
+  product_image_urls: string[];
   audio_url: string | null;
   audio_timestamps: unknown[] | null;
   avatar_video_url: string | null;
@@ -34,42 +37,86 @@ export interface JobRow {
   updated_at: string;
 }
 
-// Fields the API's PATCH endpoint may write. Everything else (id, client_id,
-// timestamps) is server-controlled.
+// Fields the PUBLIC PATCH endpoint may write. Deliberately narrow: only things
+// a user edits by hand in the Studio. Stage progression, artifact URLs,
+// provider ids, stage_plan, pipeline binding are all SERVER-controlled and are
+// written via updateJobInternal from the stage routes only. (Hardening N1.)
 const PATCHABLE_FIELDS = new Set([
-  'current_stage',
-  'stage_status',
   'topic',
   'template',
   'target_duration_sec',
   'english_script',
   'full_script',
-  'script_meta',
   'avatar_label',
   'broll_frequency',
   'editor_notes',
   'speech_speed',
-  'audio_url',
-  'audio_timestamps',
-  'avatar_video_url',
-  'broll_plan',
-  'final_video_url',
-  'provider_job_ids',
-  'error',
 ]);
 
 export function filterJobPatch(patch: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(patch).filter(([k]) => PATCHABLE_FIELDS.has(k)));
 }
 
-export async function createJob(clientId: string, createdBy?: string): Promise<JobRow> {
-  const { data, error } = await supabaseAdmin()
-    .from('jobs')
-    .insert({ client_id: clientId, created_by: createdBy ?? null })
-    .select()
-    .single();
+interface CreateJobOpts {
+  pipelineId: string;
+  voiceover?: boolean;          // per-reel; false skips adapt_voice/audio/avatar
+  injectedScript?: string;      // per-reel; when set, drops topic/script
+  productImageUrls?: string[];  // per-reel product photos (Cloudinary URLs)
+  createdBy?: string;
+}
+
+/**
+ * Create a reel job bound to a pipeline. Resolves the per-reel stage_plan from
+ * the pipeline's enabled_stages + the voiceover / inject-script choices, and
+ * seeds an injected script when supplied. Throws (caller maps to 4xx) when the
+ * pipeline is unknown, inactive, or belongs to another client.
+ */
+export async function createJob(clientId: string, opts: CreateJobOpts): Promise<JobRow> {
+  const supabase = supabaseAdmin();
+  const { data: pipeline, error: pErr } = await supabase
+    .from('client_pipelines')
+    .select('*')
+    .eq('id', opts.pipelineId)
+    .maybeSingle();
+  if (pErr) throw new Error(`Failed to load pipeline: ${pErr.message}`);
+  if (!pipeline || pipeline.client_id !== clientId || !pipeline.active) {
+    throw new Error('PIPELINE_INVALID');
+  }
+
+  const injectScript = !!opts.injectedScript;
+  const stagePlan = resolveReelStages(pipeline.enabled_stages, {
+    voiceover: opts.voiceover,
+    injectScript,
+  });
+  // The pipeline was validated when it was saved, but the per-reel toggles above
+  // subtract stages from it — and a subset of a valid plan is not necessarily
+  // valid (dropping avatar can strand assemble with no visual source). Re-check
+  // what this reel will actually run, so a broken plan is refused at creation
+  // instead of dead-ending at the stage that can't run.
+  const planErrors = validate(stagePlan);
+  if (planErrors.length) throw new Error(`PLAN_INVALID: ${planErrors.join(' ')}`);
+
+  const insert: Record<string, unknown> = {
+    client_id: clientId,
+    pipeline_id: pipeline.id,
+    stage_plan: stagePlan,
+    current_stage: stagePlan[0],
+    product_image_urls: opts.productImageUrls ?? [],
+    created_by: opts.createdBy ?? null,
+  };
+  if (injectScript) {
+    insert.english_script = opts.injectedScript;
+    // No adapt_voice pass → the injected script IS the final script.
+    if (!stagePlan.includes('adapt_voice')) insert.full_script = opts.injectedScript;
+  }
+
+  const { data, error } = await supabase.from('jobs').insert(insert).select().single();
   if (error) throw new Error(`Failed to create job: ${error.message}`);
-  return data as JobRow;
+  const job = data as JobRow;
+  if (injectScript) {
+    await logJobEvent(job.id, 'script', 'succeeded', { source: 'injected' });
+  }
+  return job;
 }
 
 export async function getJob(id: string): Promise<JobRow | null> {
@@ -78,30 +125,37 @@ export async function getJob(id: string): Promise<JobRow | null> {
   return (data as JobRow) ?? null;
 }
 
-export async function listJobs(clientId: string, limit = 50): Promise<JobRow[]> {
+export async function listJobs(clientId: string, limit = 50): Promise<any[]> {
   const { data, error } = await supabaseAdmin()
     .from('jobs')
-    .select('*')
+    .select('*, client_pipelines(name)')
     .eq('client_id', clientId)
     .order('created_at', { ascending: false })
     .limit(limit);
   if (error) throw new Error(`Failed to list jobs for ${clientId}: ${error.message}`);
-  return (data ?? []) as JobRow[];
+  return (data ?? []).map((j: any) => ({ ...j, pipeline_name: j.client_pipelines?.name ?? null }));
 }
 
-export async function updateJob(id: string, patch: Record<string, unknown>): Promise<JobRow> {
-  const filtered = filterJobPatch(patch);
-  if (Object.keys(filtered).length === 0) {
-    throw new Error('No valid job fields in patch');
-  }
+/** Internal writer — unrestricted. Used by stage routes only. */
+export async function updateJobInternal(id: string, patch: Record<string, unknown>): Promise<JobRow> {
+  if (Object.keys(patch).length === 0) throw new Error('Empty job patch');
   const { data, error } = await supabaseAdmin()
     .from('jobs')
-    .update(filtered)
+    .update(patch)
     .eq('id', id)
     .select()
     .single();
   if (error) throw new Error(`Failed to update job ${id}: ${error.message}`);
   return data as JobRow;
+}
+
+/** Public writer — filtered to user-editable fields (PATCH /api/jobs/[id]). */
+export async function updateJob(id: string, patch: Record<string, unknown>): Promise<JobRow> {
+  const filtered = filterJobPatch(patch);
+  if (Object.keys(filtered).length === 0) {
+    throw new Error('No valid job fields in patch');
+  }
+  return updateJobInternal(id, filtered);
 }
 
 export async function logJobEvent(
@@ -131,10 +185,24 @@ export async function jobClientMismatch(jobId: string, clientId: string): Promis
   return null;
 }
 
-// --- Stage transitions (used by stage routes in Phase 2) --------------------
+/**
+ * Stage guard: the requested stage must be part of this job's resolved plan.
+ * Returns a ready 409 response when the stage was toggled off for this reel.
+ */
+export function stageNotInPlan(job: JobRow, stage: StageName): NextResponse | null {
+  if (!getJobStagePlan(job).includes(stage)) {
+    return NextResponse.json(
+      { error: `Stage "${stage}" is not part of this reel's pipeline` },
+      { status: 409 }
+    );
+  }
+  return null;
+}
+
+// --- Stage transitions (used by stage routes) -------------------------------
 
 export async function startStage(jobId: string, stage: StageName): Promise<JobRow> {
-  const job = await updateJob(jobId, { current_stage: stage, stage_status: 'running', error: null });
+  const job = await updateJobInternal(jobId, { current_stage: stage, stage_status: 'running', error: null });
   await logJobEvent(jobId, stage, 'started');
   return job;
 }
@@ -144,14 +212,14 @@ export async function completeStage(
   stage: StageName,
   artifacts: Record<string, unknown> = {}
 ): Promise<JobRow> {
-  const job = await updateJob(jobId, { ...artifacts, current_stage: stage, stage_status: 'done' });
+  const job = await updateJobInternal(jobId, { ...artifacts, current_stage: stage, stage_status: 'done' });
   await logJobEvent(jobId, stage, 'succeeded');
   return job;
 }
 
 export async function failStage(jobId: string, stage: StageName, err: unknown): Promise<JobRow> {
   const message = err instanceof Error ? err.message : String(err);
-  const job = await updateJob(jobId, { current_stage: stage, stage_status: 'failed', error: message });
+  const job = await updateJobInternal(jobId, { current_stage: stage, stage_status: 'failed', error: message });
   await logJobEvent(jobId, stage, 'failed', { error: message });
   return job;
 }

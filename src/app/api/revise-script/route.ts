@@ -13,14 +13,13 @@ export async function POST(req: Request) {
     const { clientId, script, prompt, jobId } = await req.json();
 
     if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
-    if (jobId) {
-      const jobForbidden = await jobClientMismatch(jobId, clientId);
-      if (jobForbidden) return jobForbidden;
-    }
+    const jobForbidden = await jobClientMismatch(jobId, clientId);
+    if (jobForbidden) return jobForbidden;
     if (!script) return NextResponse.json({ error: 'Script is required' }, { status: 400 });
 
     const c = await loadClientConfig(clientId);

@@ -13,15 +13,27 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const forbidden = forbidClientMismatch(auth, id);
     if (forbidden) return forbidden;
     const c = await loadClientConfig(id);
-    const stagePlan = getStagePlan(c);
 
     return NextResponse.json({
       id: c.id,
+      slug: c.slug,
       displayName: c.displayName,
-      tier: c.tier,
-      contentType: c.contentType,
       localeLanguage: c.locale.language,
-      stagePlan: stagePlan.map((name) => ({ name, label: STAGE_INFO[name].label })),
+      pipelines: c.pipelines.map((p) => {
+        const stagePlan = getStagePlan(p);
+        return {
+          id: p.id,
+          name: p.name,
+          productInput: p.product_input,
+          hasVoiceStages: stagePlan.includes('audio'),
+          stagePlan: stagePlan.map((name) => ({ name, label: STAGE_INFO[name].label })),
+          duration: {
+            minSec: p.duration_min_sec,
+            maxSec: p.duration_max_sec,
+            defaultSec: p.duration_default_sec,
+          },
+        };
+      }),
       templates: c.templates.map((t) => ({
         label: t.label,
         description: t.description,
@@ -31,7 +43,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         label: a.label,
         previewImageUrl: a.preview_image_url,
       })),
-      duration: { minSec: 15, maxSec: 90, defaultSec: 45 },
     });
   } catch (error: any) {
     const notFound = /Unknown or inactive client/.test(error?.message ?? '');

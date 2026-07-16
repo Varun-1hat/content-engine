@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, type Part } from '@google/generative-ai';
 import type { ScriptAdapter, ScriptGenerateOptions } from './base';
 
 const MAX_ATTEMPTS = 3;
@@ -14,7 +14,15 @@ async function callModel(genAI: GoogleGenerativeAI, model: string, opts: ScriptG
     ...(opts.system ? { systemInstruction: opts.system } : {}),
     ...(opts.json ? { generationConfig: { responseMimeType: 'application/json' } } : {}),
   });
-  const result = await m.generateContent(opts.prompt);
+  // Gemini takes an ordered parts array. Images go first so the model reads the
+  // product before the instructions that reference it.
+  const parts: Part[] = [
+    ...(opts.images ?? []).map((img) => ({
+      inlineData: { mimeType: img.mimeType, data: img.base64 },
+    })),
+    { text: opts.prompt },
+  ];
+  const result = await m.generateContent(parts);
   return result.response.text();
 }
 

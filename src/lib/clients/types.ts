@@ -1,7 +1,3 @@
-export type ContentType = 'talking_head' | 'product_visual';
-export type ScriptMode = 'generate' | 'polish';
-export type Tier = 'script_only' | 'audio_only' | 'avatar_only' | 'full_production' | 'scenario_premium';
-
 export interface ClientAvatar {
   id: string;
   label: string;
@@ -18,14 +14,26 @@ export interface ClientTemplate {
   sort_order: number;
 }
 
-export interface ClientConfig {
+// A per-client pipeline: a named subset of the canonical stage sequence plus
+// its settings. Clients subscribe to one or more (the "variants").
+export interface ClientPipeline {
   id: string;
-  displayName: string;
-  contentType: ContentType;
-  scriptMode: ScriptMode;
-  tier: Tier;
+  name: string;
+  enabled_stages: string[];      // validated against the code stage registry
+  product_input: boolean;        // reels on this pipeline take per-reel product photos
+  duration_min_sec: number;
+  duration_max_sec: number;
+  duration_default_sec: number;
+  sort_order: number;
   active: boolean;
-  locale: { language: string; region: string };
+}
+
+export interface ClientConfig {
+  id: string;                    // uuid PK
+  slug: string;                  // human-readable; drives storage/KB folder names
+  displayName: string;
+  active: boolean;
+  locale: { language: string };
   speechWordsPerSec: number;
   knowledgeBase: {
     researchDocPath?: string;
@@ -38,6 +46,7 @@ export interface ClientConfig {
   avatarProvider: string;
   avatars: ClientAvatar[];
   templates: ClientTemplate[];
+  pipelines: ClientPipeline[];
   visual: { provider: string; stylePreset: string | null };
   storage: { provider: string; folderPrefix: string };
   extra: Record<string, unknown>;

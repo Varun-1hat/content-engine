@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getAvatarAdapter } from '@/lib/adapters/avatar';
-import { startStage, completeStage, failStage, updateJob, jobClientMismatch } from '@/lib/jobs';
+import { getJob, startStage, completeStage, failStage, updateJobInternal, stageNotInPlan } from '@/lib/jobs';
 
 // POST /api/generate-avatar — talking-head render ('avatar' stage).
 // The browser sends the LABEL; the server resolves it to the vendor avatar_id
@@ -16,14 +16,17 @@ export async function POST(req: Request) {
     jobId = body.jobId;
 
     if (!clientId) return NextResponse.json({ error: 'clientId is required' }, { status: 400 });
+    if (!jobId) return NextResponse.json({ error: 'jobId is required' }, { status: 400 });
     const auth = await requireUser();
     if (auth instanceof NextResponse) return auth;
     const forbidden = forbidClientMismatch(auth, clientId);
     if (forbidden) return forbidden;
-    if (jobId) {
-      const jobForbidden = await jobClientMismatch(jobId, clientId);
-      if (jobForbidden) return jobForbidden;
-    }
+
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    if (job.client_id !== clientId) return NextResponse.json({ error: 'Job does not belong to this client' }, { status: 403 });
+    const offPlan = stageNotInPlan(job, 'avatar');
+    if (offPlan) return offPlan;
     if (!audioUrl) return NextResponse.json({ error: 'Missing audioUrl' }, { status: 400 });
 
     const c = await loadClientConfig(clientId);
@@ -36,26 +39,24 @@ export async function POST(req: Request) {
       );
     }
 
-    if (jobId) await startStage(jobId, 'avatar');
+    await startStage(jobId, 'avatar');
 
     const { videoUrl, providerJobId } = await getAvatarAdapter(c.avatarProvider).render({
       avatarId: avatar.avatar_id,
       audioUrl,
+      // Per-reel product photos feature in the render (variant: avatar + product).
+      attachmentImageUrls: job.product_image_urls?.length ? job.product_image_urls : undefined,
       // Persist the vendor job id before polling starts so a crashed render
       // can be reconciled from the jobs table.
-      onSubmitted: jobId
-        ? async (pid) => {
-            await updateJob(jobId!, { provider_job_ids: { [c.avatarProvider]: pid } });
-          }
-        : undefined,
+      onSubmitted: async (pid) => {
+        await updateJobInternal(jobId!, { provider_job_ids: { [c.avatarProvider]: pid } });
+      },
     });
 
-    if (jobId) {
-      await completeStage(jobId, 'avatar', {
-        avatar_video_url: videoUrl,
-        avatar_label: avatar.label,
-      });
-    }
+    await completeStage(jobId, 'avatar', {
+      avatar_video_url: videoUrl,
+      avatar_label: avatar.label,
+    });
 
     return NextResponse.json({ success: true, avatarVideoUrl: videoUrl, providerJobId });
   } catch (error: any) {

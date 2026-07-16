@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, RefreshCw, RotateCcw, ExternalLink } from "lucide-react";
+import { stageLabel, statusLabel } from "@/lib/labels";
 
 // Maps a job's current stage to the route + payload that re-runs it.
 // All inputs live on the job row — that's what makes retry possible.
@@ -88,7 +89,7 @@ export default function AdminJobsPage() {
         : job.stage_status === "running"
         ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
         : "bg-amber-500/20 text-amber-400 border-amber-500/30";
-    return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${color}`}>{job.current_stage} · {job.stage_status}</span>;
+    return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border whitespace-nowrap ${color}`}>{stageLabel(job.current_stage)} · {statusLabel(job.stage_status)}</span>;
   };
 
   return (
@@ -112,9 +113,13 @@ export default function AdminJobsPage() {
                 <button onClick={() => toggleExpand(job.id)} className="w-full flex items-center justify-between gap-4 p-4 text-left">
                   <div className="flex-1 min-w-0">
                     <p className="text-white font-semibold truncate">
-                      <span className="text-primary">{job.client_id}</span> · {job.topic || "Untitled reel"}
+                      <span className="text-primary">{job.client_name || "Unknown client"}</span> · {job.topic || "Untitled reel"}
                     </p>
-                    <p className="text-xs text-gray-500 mt-1">{new Date(job.created_at).toLocaleString()} {job.created_by ? `· ${job.created_by}` : ""}</p>
+                    <p className="text-xs text-gray-500 mt-1 truncate">
+                      {new Date(job.created_at).toLocaleString()}
+                      {job.pipeline_name ? ` · ${job.pipeline_name}` : ""}
+                      {job.created_by ? ` · ${job.created_by}` : ""}
+                    </p>
                   </div>
                   {badge(job)}
                 </button>
@@ -158,7 +163,7 @@ export default function AdminJobsPage() {
                               detail.events.map((e: any) => (
                                 <div key={e.id} className="flex items-center gap-3 text-xs font-mono">
                                   <span className="text-gray-600 shrink-0">{new Date(e.created_at).toLocaleTimeString()}</span>
-                                  <span className="text-gray-300">{e.stage}</span>
+                                  <span className="text-gray-300">{stageLabel(e.stage)}</span>
                                   <span className={e.event === "failed" ? "text-red-400" : e.event === "succeeded" ? "text-green-400" : "text-gray-400"}>{e.event}</span>
                                   {e.detail && Object.keys(e.detail).length > 0 && (
                                     <span className="text-gray-600 truncate">{JSON.stringify(e.detail)}</span>

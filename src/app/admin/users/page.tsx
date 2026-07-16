@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, UserPlus } from "lucide-react";
+import { humanize } from "@/lib/labels";
 
 export default function AdminUsersPage() {
   const [users, setUsers] = useState<any[]>([]);
@@ -122,7 +123,11 @@ export default function AdminUsersPage() {
               <div key={u.email} className="flex items-center justify-between gap-4 p-4 rounded-xl border bg-indigo-950/30 border-gray-700">
                 <div className="flex-1 min-w-0">
                   <p className="text-white font-semibold truncate">{u.email} {u.email === me && <span className="text-gray-500 text-xs">(you)</span>}</p>
-                  <p className="text-xs text-gray-500 mt-1">{u.role}{u.client_id ? ` · ${u.client_id}` : ""} · added {new Date(u.created_at).toLocaleDateString()}</p>
+                  <p className="text-xs text-gray-500 mt-1 truncate">
+                    {humanize(u.role)}
+                    {u.client_id ? ` · ${clients.find((c) => c.id === u.client_id)?.display_name ?? "Unknown client"}` : ""}
+                    {` · added ${new Date(u.created_at).toLocaleDateString()}`}
+                  </p>
                 </div>
                 <button
                   onClick={() => toggleActive(u)}
