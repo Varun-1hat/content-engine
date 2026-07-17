@@ -93,7 +93,7 @@ export async function createJob(clientId: string, opts: CreateJobOpts): Promise<
   // valid (dropping avatar can strand assemble with no visual source). Re-check
   // what this reel will actually run, so a broken plan is refused at creation
   // instead of dead-ending at the stage that can't run.
-  const planErrors = validate(stagePlan);
+  const planErrors = validate(stagePlan, { scriptSupplied: injectScript });
   if (planErrors.length) throw new Error(`PLAN_INVALID: ${planErrors.join(' ')}`);
 
   const insert: Record<string, unknown> = {

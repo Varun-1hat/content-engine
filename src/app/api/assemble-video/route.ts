@@ -65,6 +65,18 @@ export async function POST(req: Request) {
     const failedClips: { index: number; reason: string }[] = [];
     const productUrls = job.product_image_urls ?? [];
 
+    // Fetch this reel's product photos ONCE, up front. They serve two purposes:
+    // placed directly as stills ("product_image" entries), and passed to the
+    // generator as reference images so a generated shot depicts the real
+    // product instead of inventing one.
+    const productPaths: string[] = [];
+    for (const [i, url] of productUrls.entries()) {
+      const ext = path.extname(new URL(url).pathname).toLowerCase() || '.jpg';
+      const p = path.join(tempDir, `product_${i}${ext}`);
+      await downloadToFile(url, p);
+      productPaths.push(p);
+    }
+
     await Promise.all(
       brolls.map(async (b: any, index: number) => {
         const start = b.start_second ?? b.start ?? 0;
@@ -73,20 +85,30 @@ export async function POST(req: Request) {
           if (b.media_type === 'product_image') {
             // Direct placement of an uploaded product photo — no generation.
             const idx = b.product_image_index ?? 0;
-            const url = productUrls[idx];
-            if (!url) throw new Error(`product_image_index ${idx} has no uploaded photo`);
-            const outPath = path.join(tempDir, `broll_${index}.jpg`);
-            await downloadToFile(url, outPath);
-            placements.push({ localPath: outPath, start, end, isImage: true });
+            const localPath = productPaths[idx];
+            if (!localPath) throw new Error(`product_image_index ${idx} has no uploaded photo`);
+            placements.push({ localPath, start, end, isImage: true });
             return;
           }
           const isImage = b.media_type === 'image';
           const outPath = path.join(tempDir, `broll_${index}${isImage ? '.jpg' : '.mp4'}`);
+
+          // Per-clip opt-in from the b-roll plan: only shots that actually show
+          // the product are conditioned on it. Reference images force the
+          // subject into the frame, so applying them to every clip would put
+          // the product in shots that shouldn't have it.
+          const featuresProduct = b.features_product === true;
+          if (featuresProduct && productPaths.length === 0) {
+            throw new Error('b-roll entry is marked features_product but this reel has no product photos');
+          }
+
           await visual.generateClip({
             prompt: b.veo_prompt || b.prompt || '',
             negativePrompt: b.negative_prompt || '',
             mediaType: isImage ? 'image' : 'video',
             outPath,
+            referenceImages: featuresProduct ? productPaths.slice(0, visual.maxReferenceImages) : undefined,
+            models: c.visual.models,
           });
           placements.push({ localPath: outPath, start, end, isImage });
         } catch (e: any) {

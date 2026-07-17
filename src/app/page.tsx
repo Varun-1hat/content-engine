@@ -27,6 +27,8 @@ interface UiConfig {
   slug: string;
   displayName: string;
   localeLanguage: string;
+  /** Max product photos this client's visual provider can use, per reel. */
+  productImageLimit: number;
   pipelines: UiPipeline[];
   templates: UiTemplate[];
   avatars: UiAvatar[];
@@ -262,10 +264,25 @@ export default function Home() {
 
   async function handleProductFiles(files: FileList | null) {
     if (!files || !client) return;
+    // The limit comes from the client's visual provider (ui-config), not a
+    // constant — a provider that takes a different number of reference photos
+    // must not need a UI change. Uploading more than the provider can use would
+    // be silently truncated at generation time.
+    const limit = client.productImageLimit;
+    const room = limit - productUrls.length;
+    if (room <= 0) {
+      alert(`You can use at most ${limit} product photo${limit === 1 ? "" : "s"} per reel. Remove one to add another.`);
+      return;
+    }
+    const picked = Array.from(files);
+    if (picked.length > room) {
+      alert(`Only ${room} more photo${room === 1 ? "" : "s"} can be added (limit ${limit} per reel). Taking the first ${room}.`);
+    }
+
     setIsUploading(true);
     try {
       const urls = [...productUrls];
-      for (const file of Array.from(files)) {
+      for (const file of picked.slice(0, room)) {
         const fd = new FormData();
         fd.append("file", file);
         fd.append("clientId", client.id);
@@ -705,8 +722,10 @@ export default function Home() {
               {/* Per-reel product photos */}
               {selectedPipeline.productInput && (
                 <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Product photos</label>
-                  <p className="text-gray-500 text-xs mb-3">Uploaded per reel — used as reference for this generation only. Nothing is saved to the client.</p>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">
+                    Product photos <span className="text-gray-600 normal-case font-normal">({productUrls.length}/{client.productImageLimit})</span>
+                  </label>
+                  <p className="text-gray-500 text-xs mb-3">Uploaded per reel — used as reference for this generation only. Nothing is saved to the client. Up to {client.productImageLimit} per reel; every photo you add is used.</p>
                   <div className="flex flex-wrap gap-3 mb-3">
                     {productUrls.map((u, i) => (
                       <div key={i} className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-700">
@@ -720,11 +739,13 @@ export default function Home() {
                         </button>
                       </div>
                     ))}
-                    <label className={`w-20 h-20 rounded-lg border border-dashed border-gray-600 flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-gray-400 transition-colors ${isUploading ? "opacity-50" : ""}`}>
-                      {isUploading ? <Loader2 size={18} className="animate-spin text-primary" /> : <Upload size={18} className="text-gray-500" />}
-                      <span className="text-[10px] text-gray-500">Add</span>
-                      <input type="file" accept="image/*" multiple className="hidden" disabled={isUploading} onChange={(e) => handleProductFiles(e.target.files)} />
-                    </label>
+                    {productUrls.length < client.productImageLimit && (
+                      <label className={`w-20 h-20 rounded-lg border border-dashed border-gray-600 flex flex-col items-center justify-center gap-1 cursor-pointer hover:border-gray-400 transition-colors ${isUploading ? "opacity-50" : ""}`}>
+                        {isUploading ? <Loader2 size={18} className="animate-spin text-primary" /> : <Upload size={18} className="text-gray-500" />}
+                        <span className="text-[10px] text-gray-500">Add</span>
+                        <input type="file" accept="image/*" multiple className="hidden" disabled={isUploading} onChange={(e) => handleProductFiles(e.target.files)} />
+                      </label>
+                    )}
                   </div>
                 </div>
               )}

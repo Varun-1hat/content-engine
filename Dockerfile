@@ -9,8 +9,12 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 
-# Install Python dependencies required by veo_generator.py
-RUN pip3 install google-genai requests
+# Install Python dependencies required by the generators.
+# Pinned to a major: all four generators depend on specific SDK surface
+# (types.VideoGenerationReferenceImage, types.Image.from_file, types.ImageConfig,
+# types.Part.from_bytes, GenerateContentConfig.response_modalities). Unpinned, a
+# major release breaks generation on the next rebuild with no code change here.
+RUN pip3 install "google-genai>=2.11,<3" requests
 
 # Copy the rest of the application code
 COPY . .

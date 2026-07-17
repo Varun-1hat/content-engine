@@ -94,17 +94,32 @@ export async function POST(req: Request) {
     }
 
     // 5. KB docs copied as starting skeletons.
+    // A doc that fails to copy must not be silent: the KB *is* the client's
+    // content, and a half-copied clone looks exactly like a whole one from the
+    // outside. Report what was skipped and why so onboarding can act on it —
+    // readiness only sees "empty doc" later, without knowing the copy failed.
     const copied: string[] = [];
+    const skipped: { doc: string; reason: string }[] = [];
     for (const key of Object.keys(KB_DOCS)) {
       const meta = KB_DOCS[key];
       const srcPath = (source as any)[meta.column];
-      if (!srcPath) continue;
+      if (!srcPath) {
+        skipped.push({ doc: meta.filename, reason: 'the source client has no such doc' });
+        continue;
+      }
       const dl = await supabase.storage.from(KB_BUCKET).download(srcPath);
-      if (dl.error) continue;
+      if (dl.error) {
+        skipped.push({ doc: meta.filename, reason: `could not read "${srcPath}": ${dl.error.message}` });
+        continue;
+      }
       const buf = Buffer.from(await dl.data.arrayBuffer());
       const destPath = `${slug}/${meta.filename}`;
       const up = await supabase.storage.from(KB_BUCKET).upload(destPath, buf, { contentType: 'text/markdown', upsert: true });
-      if (!up.error) copied.push(destPath);
+      if (up.error) {
+        skipped.push({ doc: meta.filename, reason: `could not write "${destPath}": ${up.error.message}` });
+        continue;
+      }
+      copied.push(destPath);
     }
 
     return NextResponse.json({
@@ -112,6 +127,7 @@ export async function POST(req: Request) {
       clientId: newId,
       slug,
       copiedKbDocs: copied,
+      skippedKbDocs: skipped,
       checklist: [
         'Edit the KB docs for the new client (they are copies of the source)',
         'Set voice_id (ElevenLabs voice for this client)',

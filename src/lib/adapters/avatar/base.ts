@@ -19,9 +19,11 @@
 export interface AvatarRenderOptions {
   avatarId: string;
   audioUrl: string;
-  // Per-reel product photos to feature in the render (variant: avatar + product).
-  // Optional — omitted for plain talking-head reels (no behaviour change).
-  attachmentImageUrls?: string[];
+  // A pre-composited "presenter holding the product" still (public URL). When
+  // set, the provider animates THIS image with lip-sync (product IN the shot,
+  // held) instead of rendering the plain avatar_id. Omitted for talking-head
+  // reels. Built by the visual adapter's composePresenterProduct().
+  presenterImageUrl?: string;
   onSubmitted?: (providerJobId: string) => void | Promise<void>;
 }
 
@@ -32,4 +34,11 @@ export interface AvatarRenderResult {
 
 export interface AvatarAdapter {
   render(opts: AvatarRenderOptions): Promise<AvatarRenderResult>;
+  /**
+   * OPTIONAL. The avatar's real still image (a public URL), used as the person
+   * input when compositing the presenter with a product. A provider that can't
+   * supply one omits this; the avatar stage then skips the composite and renders
+   * a plain talking head (product still appears via B-roll).
+   */
+  getPresenterImage?(avatarId: string): Promise<string | null>;
 }

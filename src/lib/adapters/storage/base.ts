@@ -12,6 +12,9 @@
 //   - Return a publicly fetchable HTTPS URL — downstream vendors (HeyGen etc.)
 //     download media from this URL, so it cannot require auth headers.
 //   - Respect the folder namespace passed in; never invent paths.
+//   - list/remove are OPTIONAL (only the cleanup route needs them). Implement
+//     both or neither. `remove` must delete exactly the ids it is given and
+//     nothing else — the caller has already decided what is safe to delete.
 // =============================================================================
 
 export interface UploadOptions {
@@ -19,6 +22,19 @@ export interface UploadOptions {
   resourceType?: 'video' | 'image' | 'raw';
 }
 
+export interface StoredAsset {
+  /** Provider-side id used for deletion. */
+  publicId: string;
+  url: string;
+  /** ISO-8601. */
+  createdAt: string;
+  bytes: number;
+}
+
 export interface StorageAdapter {
   upload(buffer: Buffer, opts: UploadOptions): Promise<string>;
+  /** Every asset under a folder prefix. Optional. */
+  list?(prefix: string, resourceType?: 'video' | 'image' | 'raw'): Promise<StoredAsset[]>;
+  /** Delete by publicId; returns how many were deleted. Optional. */
+  remove?(publicIds: string[], resourceType?: 'video' | 'image' | 'raw'): Promise<number>;
 }

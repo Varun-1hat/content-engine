@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createJob, listJobs } from '@/lib/jobs';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
+import { getVisualAdapter } from '@/lib/adapters/visual';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 
 // POST /api/jobs — create a reel job bound to a pipeline.
@@ -17,7 +18,20 @@ export async function POST(req: Request) {
     if (forbidden) return forbidden;
 
     // Validates the client exists and is active (throws otherwise).
-    await loadClientConfig(clientId);
+    const c = await loadClientConfig(clientId);
+
+    // The Studio caps uploads at the provider's limit, but that's a UI courtesy
+    // — enforce it here too. Truncating silently would mean the photos a user
+    // uploaded are not the photos their reel was built from.
+    if (Array.isArray(productImageUrls)) {
+      const limit = getVisualAdapter(c.visual.provider).maxReferenceImages;
+      if (productImageUrls.length > limit) {
+        return NextResponse.json(
+          { error: `At most ${limit} product photo(s) per reel for this client's visual provider (got ${productImageUrls.length}).` },
+          { status: 400 }
+        );
+      }
+    }
 
     const job = await createJob(clientId, {
       pipelineId,

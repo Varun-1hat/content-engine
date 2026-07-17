@@ -47,7 +47,19 @@ export interface ClientConfig {
   avatars: ClientAvatar[];
   templates: ClientTemplate[];
   pipelines: ClientPipeline[];
-  visual: { provider: string; stylePreset: string | null };
+  visual: {
+    provider: string;
+    stylePreset: string | null;
+    // Model ids are DB config (same rule as the script models) — a vendor
+    // retirement is an admin-panel edit, not a redeploy. Which of these a
+    // provider uses is up to that provider's adapter.
+    models: {
+      video: string;
+      image: string;
+      /** Stills that must depict the REAL product (reference-conditioned). */
+      productImage: string;
+    };
+  };
   storage: { provider: string; folderPrefix: string };
   extra: Record<string, unknown>;
 }

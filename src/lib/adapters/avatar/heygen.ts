@@ -37,31 +37,51 @@ function sleep(ms: number) {
 }
 
 export const heygenAvatarAdapter: AvatarAdapter = {
-  async render({ avatarId, audioUrl, attachmentImageUrls, onSubmitted }) {
+  // The avatar's real still, for presenter+product compositing. HeyGen exposes
+  // it on the avatar-details endpoint. Returns null (never throws) so a lookup
+  // failure downgrades to a plain talking head rather than failing the stage.
+  async getPresenterImage(avatarId) {
+    const apiKey = process.env.HEYGEN_API_KEY;
+    if (!apiKey || !avatarId) return null;
+    try {
+      const res = await fetch(`${API_BASE}/v2/avatar/${avatarId}/details`, { headers: { 'x-api-key': apiKey } });
+      if (!res.ok) return null;
+      const body = await res.json().catch(() => ({}));
+      return body?.data?.preview_image_url ?? null;
+    } catch {
+      return null;
+    }
+  },
+
+  async render({ avatarId, audioUrl, presenterImageUrl, onSubmitted }) {
     const apiKey = process.env.HEYGEN_API_KEY;
     if (!apiKey) throw new Error('HEYGEN_API_KEY is not set');
-    if (!avatarId) throw new Error('avatarId is required (no client_avatars row matched)');
     if (!audioUrl) throw new Error('audioUrl is required (the avatar is lip-synced to it)');
 
-    // v3 is a flat, top-level body (v2's nested video_inputs[].character/voice is
-    // gone). 9:16 at 1080p is the product.
-    const payload: Record<string, unknown> = {
-      type: 'avatar',
-      avatar_id: avatarId,
-      audio_url: audioUrl,
-      aspect_ratio: '9:16',
-      resolution: '1080p',
-    };
-
-    // Product reels: the uploaded photo becomes the scene background, so the
-    // presenter is filmed against the product. `background` accepts a public url
-    // directly ({ type: 'image', url }) — no asset upload needed. NOTE: a
-    // background is the only documented way to get a product into an avatar
-    // render; it is NOT a product-placement/overlay feature. Assembly also
-    // places the product photos as B-roll, which is what actually guarantees the
-    // product appears in the finished reel.
-    if (attachmentImageUrls && attachmentImageUrls.length > 0) {
-      payload.background = { type: 'image', url: attachmentImageUrls[0] };
+    // Two render modes, both flat v3 bodies lip-synced to our audio_url:
+    //   * presenterImageUrl set → type:'image' (Avatar IV): animate the
+    //     pre-composited "presenter holding the product" still, so the product
+    //     is IN the shot. This REPLACES the old background hack, which only put
+    //     the product behind a letterboxed avatar (not product placement).
+    //   * otherwise → type:'avatar': the plain talking head from avatar_id.
+    let payload: Record<string, unknown>;
+    if (presenterImageUrl) {
+      payload = {
+        type: 'image',
+        image: { type: 'url', url: presenterImageUrl },
+        audio_url: audioUrl,
+        aspect_ratio: '9:16',
+        resolution: '1080p',
+      };
+    } else {
+      if (!avatarId) throw new Error('avatarId is required (no client_avatars row matched)');
+      payload = {
+        type: 'avatar',
+        avatar_id: avatarId,
+        audio_url: audioUrl,
+        aspect_ratio: '9:16',
+        resolution: '1080p',
+      };
     }
 
     // --- Submit ---------------------------------------------------------------

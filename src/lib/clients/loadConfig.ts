@@ -69,7 +69,15 @@ function mapRow(row: any, avatarRows: any[], templateRows: any[], pipelineRows: 
       sort_order: p.sort_order,
       active: p.active,
     })),
-    visual: { provider: row.visual_provider, stylePreset: row.visual_style_preset },
+    visual: {
+      provider: row.visual_provider,
+      stylePreset: row.visual_style_preset,
+      models: {
+        video: row.model_visual_video,
+        image: row.model_visual_image,
+        productImage: row.model_visual_product_image,
+      },
+    },
     storage: { provider: row.storage_provider, folderPrefix: row.storage_folder_prefix },
     extra: row.extra ?? {},
   };

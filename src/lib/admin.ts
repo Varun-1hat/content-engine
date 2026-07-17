@@ -9,6 +9,7 @@ const CLIENT_PATCHABLE = new Set([
   'script_provider', 'model_script', 'model_structured', 'model_fallback',
   'voice_provider', 'voice_id', 'voice_model_id', 'voice_stability',
   'avatar_provider', 'visual_provider', 'visual_style_preset',
+  'model_visual_video', 'model_visual_image', 'model_visual_product_image',
   'storage_provider', 'storage_folder_prefix', 'extra',
 ]);
 

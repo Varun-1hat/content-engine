@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { getStagePlan, STAGE_INFO } from '@/lib/pipeline/stages';
+import { getVisualAdapter } from '@/lib/adapters/visual';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 
 // GET /api/clients/[id]/ui-config — the safe UI subset of a client's config.
@@ -19,6 +20,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       slug: c.slug,
       displayName: c.displayName,
       localeLanguage: c.locale.language,
+      // How many product photos this client's visual provider can actually use.
+      // The Studio caps uploads at this so nothing is silently truncated later.
+      // It's a count, not a vendor id — no provider detail reaches the browser.
+      productImageLimit: getVisualAdapter(c.visual.provider).maxReferenceImages,
       pipelines: c.pipelines.map((p) => {
         const stagePlan = getStagePlan(p);
         return {

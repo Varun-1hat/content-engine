@@ -1,8 +1,74 @@
 import { NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getAvatarAdapter } from '@/lib/adapters/avatar';
+import { getVisualAdapter } from '@/lib/adapters/visual';
+import { getStorageAdapter } from '@/lib/adapters/storage';
+import { downloadToFile } from '@/lib/pipeline/assembly';
 import { getJob, startStage, completeStage, failStage, updateJobInternal, stageNotInPlan } from '@/lib/jobs';
+import type { ResolvedClient } from '@/lib/clients/types';
+
+/**
+ * Product + avatar reel: composite the presenter holding the product into one
+ * still, so HeyGen animates the product IN the shot (type:'image') instead of
+ * putting it behind a letterboxed avatar. Returns the composite's public URL, or
+ * null to fall back to a plain talking head (the product still appears via
+ * B-roll). NEVER throws — a composite that fails must downgrade, not fail the
+ * reel.
+ */
+async function buildPresenterComposite(
+  c: ResolvedClient,
+  avatarId: string,
+  productUrls: string[]
+): Promise<string | null> {
+  const avatarAdapter = getAvatarAdapter(c.avatarProvider);
+  const visual = getVisualAdapter(c.visual.provider);
+  // Both capabilities are optional; without either, downgrade cleanly.
+  if (!avatarAdapter.getPresenterImage || !visual.composePresenterProduct) return null;
+
+  let tempDir = '';
+  try {
+    const presenterUrl = await avatarAdapter.getPresenterImage(avatarId);
+    if (!presenterUrl) return null;
+
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'presenter-'));
+    const presenterPath = path.join(tempDir, 'presenter.jpg');
+    await downloadToFile(presenterUrl, presenterPath);
+
+    const productPaths: string[] = [];
+    for (const [i, url] of productUrls.slice(0, visual.maxReferenceImages).entries()) {
+      const ext = path.extname(new URL(url).pathname).toLowerCase() || '.jpg';
+      const p = path.join(tempDir, `product_${i}${ext}`);
+      await downloadToFile(url, p);
+      productPaths.push(p);
+    }
+
+    const outPath = path.join(tempDir, 'composite.png');
+    await visual.composePresenterProduct({
+      presenterImagePath: presenterPath,
+      productImagePaths: productPaths,
+      prompt: 'clean modern studio background, soft even lighting, product clearly visible',
+      outPath,
+      models: c.visual.models,
+    });
+
+    const folderPrefix = c.storage.folderPrefix || c.slug;
+    return await getStorageAdapter(c.storage.provider).upload(fs.readFileSync(outPath), {
+      folder: `${folderPrefix}/jobs/_incoming/presenter`,
+      resourceType: 'image',
+    });
+  } catch (err: any) {
+    // Downgrade, don't fail: the reel still renders as a talking head and the
+    // product appears via B-roll. Log so the flakiness is visible.
+    console.warn(`Presenter composite failed, falling back to plain avatar: ${err?.message ?? err}`);
+    return null;
+  } finally {
+    if (tempDir) { try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {} }
+  }
+}
 
 // POST /api/generate-avatar — talking-head render ('avatar' stage).
 // The browser sends the LABEL; the server resolves it to the vendor avatar_id
@@ -41,15 +107,26 @@ export async function POST(req: Request) {
 
     await startStage(jobId, 'avatar');
 
+    // Product reel: try to composite the presenter holding the product so it's
+    // IN the render. Falls back to null (plain talking head) if unavailable or
+    // if the composite fails — the product still appears via B-roll either way.
+    const productUrls = job.product_image_urls ?? [];
+    const presenterImageUrl = productUrls.length
+      ? await buildPresenterComposite(c, avatar.avatar_id, productUrls)
+      : null;
+
     const { videoUrl, providerJobId } = await getAvatarAdapter(c.avatarProvider).render({
       avatarId: avatar.avatar_id,
       audioUrl,
-      // Per-reel product photos feature in the render (variant: avatar + product).
-      attachmentImageUrls: job.product_image_urls?.length ? job.product_image_urls : undefined,
+      presenterImageUrl: presenterImageUrl ?? undefined,
       // Persist the vendor job id before polling starts so a crashed render
-      // can be reconciled from the jobs table.
+      // can be reconciled from the jobs table. Merge rather than replace: the
+      // column is a map keyed by provider, and a bare assignment would drop any
+      // id another provider had already recorded for this reel.
       onSubmitted: async (pid) => {
-        await updateJobInternal(jobId!, { provider_job_ids: { [c.avatarProvider]: pid } });
+        await updateJobInternal(jobId!, {
+          provider_job_ids: { ...(job.provider_job_ids ?? {}), [c.avatarProvider]: pid },
+        });
       },
     });
 

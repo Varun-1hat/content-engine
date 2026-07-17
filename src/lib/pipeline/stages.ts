@@ -47,8 +47,16 @@ export function normalizeStages(names: readonly string[]): StageName[] {
 /**
  * Structural validity of a stage set. Returns human-readable errors (empty = OK).
  * Enforced when an admin saves a pipeline AND when a job's plan is resolved.
+ *
+ * `scriptSupplied` says whether this reel comes with a user-supplied script. It
+ * is only knowable at job resolution — a pipeline with no script stage (e.g. the
+ * client-script variant) is perfectly valid, because injection is a per-reel
+ * choice — so the text-source rule below is opt-in and pipeline-save skips it.
  */
-export function validate(names: readonly string[]): string[] {
+export function validate(
+  names: readonly string[],
+  opts: { scriptSupplied?: boolean } = {}
+): string[] {
   const errors: string[] = [];
   const unknown = names.filter((n) => !STAGE_SET.has(n));
   if (unknown.length) errors.push(`Unknown stage(s): ${unknown.join(', ')}`);
@@ -68,6 +76,20 @@ export function validate(names: readonly string[]): string[] {
   // needs at least one visual source.
   if (has('assemble') && !has('avatar') && !has('broll_plan')) {
     errors.push('The assemble stage requires either the avatar stage or the B-roll plan stage (nothing to assemble otherwise).');
+  }
+  // These stages all consume a script, and the script stage is what produces one
+  // — unless the user supplies their own for this reel. Without either, they get
+  // a 400 ("Missing script") at the stage itself, after the earlier stages have
+  // already been paid for. Same reasoning as the assemble rule: refuse the plan
+  // up front rather than dead-end partway through.
+  if (opts.scriptSupplied !== undefined && !has('script') && !opts.scriptSupplied) {
+    const needsScript = (['adapt_voice', 'audio', 'broll_plan'] as StageName[]).filter(has);
+    if (needsScript.length) {
+      const labels = needsScript.map((s) => STAGE_INFO[s].label).join(', ');
+      errors.push(
+        `The ${labels} stage(s) need a script: enable the Script stage, or supply your own script for this reel.`
+      );
+    }
   }
   return errors;
 }
