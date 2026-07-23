@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { getFfmpeg, hasAudioStream, getDurationSeconds } from './ffmpeg';
+import { checkNarrationCoverage } from './coverage';
 
 // Vendor-free assembly: download helper + ffmpeg overlay/stitch logic.
 // Extracted from assemble-video/route.ts unchanged in behavior.
@@ -115,10 +116,8 @@ const AUDIO_FORMAT = `aformat=sample_rates=${AUDIO_RATE}:channel_layouts=${AUDIO
 // amplitude multiplier: 1.0 leaves the bed untouched, 0 silences it.
 const DUCK_UNDER_VOICEOVER = 0.18;
 
-// A concat reel must cover at least this much of the voiceover before we accept
-// it. The slack absorbs rounding in the plan; anything below is a reel that stops
-// mid-sentence.
-const MIN_NARRATION_COVERAGE = 0.95;
+// The narration-coverage guard (MIN_NARRATION_COVERAGE) lives in ./coverage so it
+// can be unit-tested without ffmpeg — see checkNarrationCoverage, used below.
 
 /**
  * Concatenate B-roll clips into a single 1080x1920 video — the assembly path
@@ -166,14 +165,8 @@ export async function concatBrolls(
   // doesn't tile the narration rather than ship a truncated reel.
   if (opts.audioPath) {
     const narrationSec = await getDurationSeconds(opts.audioPath);
-    const coverageSec = durations.reduce((sum, d) => sum + d, 0);
-    if (coverageSec < narrationSec * MIN_NARRATION_COVERAGE) {
-      throw new Error(
-        `The B-roll plan covers only ${coverageSec.toFixed(1)}s of the ${narrationSec.toFixed(1)}s voiceover, ` +
-          `so the reel would be cut off mid-sentence. With no avatar the clips are the entire video and must tile ` +
-          `the full narration contiguously — regenerate the B-roll plan.`
-      );
-    }
+    const coverageError = checkNarrationCoverage(durations, narrationSec);
+    if (coverageError) throw new Error(coverageError);
   }
 
   // Silence inputs for the segments that have no audio of their own.

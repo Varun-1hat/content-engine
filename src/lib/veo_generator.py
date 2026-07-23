@@ -32,6 +32,32 @@ POLL_INTERVAL_SECONDS = 15
 MAX_POLL_SECONDS = 900
 
 
+# Extension -> MIME, resolved here rather than by the platform.
+#
+# types.Image.from_file() infers the MIME type from Python's `mimetypes`
+# registry, which does NOT know .webp on many systems (Windows in particular):
+# it returns None, the SDK then omits `mimeType` from the payload, and Veo
+# rejects the whole call with
+#   400 INVALID_ARGUMENT "Image field doesn't have expected `bytesBase64Encoded`
+#   or `mimeType` fields".
+# Product photos are whatever the client uploaded and /api/uploads accepts any
+# image/* — webp is the norm for product photography — so a platform-dependent
+# guess would fail EVERY product clip for those reels. nanobanana_generator.py
+# already maps the type explicitly; Veo must too.
+MIME_BY_EXT = {
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+}
+DEFAULT_REFERENCE_MIME = "image/jpeg"
+
+
+def reference_mime_type(path):
+    return MIME_BY_EXT.get(os.path.splitext(path)[1].lower(), DEFAULT_REFERENCE_MIME)
+
+
 def build_reference_images(paths, output_filename):
     """Wrap local image files as Veo 'asset' references.
 
@@ -43,9 +69,11 @@ def build_reference_images(paths, output_filename):
     for p in paths[:MAX_REFERENCE_IMAGES]:
         if not os.path.exists(p):
             fail(output_filename, f"reference image not found: {p}", retryable=False)
+        with open(p, "rb") as f:
+            image_bytes = f.read()
         refs.append(
             types.VideoGenerationReferenceImage(
-                image=types.Image.from_file(location=p),
+                image=types.Image(image_bytes=image_bytes, mime_type=reference_mime_type(p)),
                 reference_type="asset",
             )
         )
@@ -75,6 +103,34 @@ def describe_filtered(response):
         detail = "; ".join(str(r) for r in reasons) if reasons else "no reason given"
         return f"blocked by Veo's safety filter ({count} filtered) — {detail}"
     return None
+
+
+def api_error_status(err):
+    """HTTP status carried by a google-genai APIError, when there is one."""
+    for attr in ("code", "status_code"):
+        value = getattr(err, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def describe_api_error(err):
+    """One readable line for a vendor SDK exception."""
+    status = api_error_status(err)
+    message = getattr(err, "message", None) or str(err)
+    return f"HTTP {status}: {message}" if status else str(message)
+
+
+def is_retryable_api_error(err):
+    """A 4xx (other than 429) is a contract/config error: the identical request
+    will be rejected again, so retrying only burns time and spend. 429 and 5xx
+    and transport failures may clear on their own."""
+    status = api_error_status(err)
+    if status is None:
+        return True
+    if status == 429:
+        return True
+    return not (400 <= status < 500)
 
 
 def generate(prompt, negative_prompt, output_filename, model=None, reference_paths=None):
@@ -124,11 +180,22 @@ def generate(prompt, negative_prompt, output_filename, model=None, reference_pat
         config_kwargs["negative_prompt"] = negative_prompt
 
     print(f"[{output_filename}] Initiating video generation using Veo...")
-    operation = client.models.generate_videos(
-        model=model,
-        prompt=prompt,
-        config=types.GenerateVideosConfig(**config_kwargs),
-    )
+    try:
+        operation = client.models.generate_videos(
+            model=model,
+            prompt=prompt,
+            config=types.GenerateVideosConfig(**config_kwargs),
+        )
+    except Exception as err:
+        # Without this the SDK exception escapes as a raw traceback: the adapter
+        # surfaces stderr, so the operator gets a Python stack instead of the
+        # vendor's reason, and the default exit code (1) burns all three attempts
+        # on a request the API rejects identically every time.
+        fail(
+            output_filename,
+            f"Veo rejected the generation request — {describe_api_error(err)}",
+            retryable=is_retryable_api_error(err),
+        )
 
     print(f"[{output_filename}] Operation started: {operation.name}")
     print(f"[{output_filename}] Polling every {POLL_INTERVAL_SECONDS}s (ceiling {MAX_POLL_SECONDS}s)...")
@@ -143,7 +210,14 @@ def generate(prompt, negative_prompt, output_filename, model=None, reference_pat
                 retryable=False,
             )
         time.sleep(POLL_INTERVAL_SECONDS)
-        operation = client.operations.get(operation)
+        try:
+            operation = client.operations.get(operation)
+        except Exception as err:
+            fail(
+                output_filename,
+                f"Veo polling failed — {describe_api_error(err)}",
+                retryable=is_retryable_api_error(err),
+            )
         print(f"[{output_filename}] Polling status...")
 
     # A done operation can still be a FAILED operation. Surface Veo's own reason

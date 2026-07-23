@@ -6,10 +6,10 @@ For *why* any of it exists, read the v3 doc pack (`kiran-reels-docs-v3.zip`, use
 
 | | |
 |---|---|
-| **Updated** | 2026-07-17 (HeyGen product-placement research — next-todo prep, no code changed) |
-| **Branch** | `interface`, HEAD `186db26` — **uncommitted** |
-| **Gates** | `tsc` 0 · `next build` 0 (28 pages) · assembly+plan harness **16/16** · generator contract **18/18** |
-| **Live DB** | Supabase `oyxpwfpbfqcfbuklnsjq` · migrations `0001`–`0005` applied |
+| **Updated** | 2026-07-18 (**close-out complete**: variants 3 + 6 rendered E2E through the Studio · **M12 webp bug found + fixed** · regression tests + DB hardening + cleanup verified) |
+| **Branch** | `interface`, HEAD `268ee98` (v4 committed). Working tree: v4.1 close-out **uncommitted** — `0006` migration, `tests/`, `coverage.ts`, edits to `assembly.ts`/`package.json`/`tsconfig.json` |
+| **Gates** | `tsc` 0 · `next build` 0 (27 API routes) · **committed** tests `npm test` **32/32** (coverage guard · stage-plan validation · generator CLI contract · webp MIME regression) |
+| **Live DB** | Supabase `oyxpwfpbfqcfbuklnsjq` · migrations `0001`–`0006` applied (`0006` pins `set_updated_at` search_path → Supabase security WARN cleared) |
 | **Vendors** | ✅ **ElevenLabs, HeyGen v3 and Veo all called live and passing** (2026-07-17) |
 | **Deadline** | **2026-11-01** HeyGen v1/v2 retire — code is on v3 and **v3 is now proven**. Handled. |
 
@@ -22,7 +22,7 @@ For *why* any of it exists, read the v3 doc pack (`kiran-reels-docs-v3.zip`, use
 | 1 | Gaps causing prod issues | ✅ pass | Every known blocker/major closed and verified. Residual risk is listed below, not silent. |
 | 2 | Customizability | ✅ pass | 4-bucket model holds; model ids are DB columns, no redeploy. |
 | 3 | Modularity & stage skipping | ✅ pass | Toggles → snapshot → one reader → 409. Text-source rule closed server-side. |
-| 4 | All variants work individually & together | 🟠 near-pass | Variants 1 & 5 **rendered E2E through the Studio** (§2b). Variant 3 (Route B product placement) **built + proven live** (§R4), Studio run pending. Variant 6 not yet rendered. |
+| 4 | All variants work individually & together | ✅ pass | **All four sold variants now rendered E2E through the Studio**: 1 & 5 (§2b, 2026-07-17), **3 & 6 (§5, 2026-07-18)**. Overlay mode keeps gaps, concat mode tiles contiguously — both confirmed on real reels. |
 
 ---
 
@@ -68,6 +68,15 @@ For *why* any of it exists, read the v3 doc pack (`kiran-reels-docs-v3.zip`, use
 
 **None known.** Everything inventoried is fixed and verified, or listed below as an explicit, accepted residual.
 
+### M12 — 🔴 WebP product photos 400'd EVERY Veo product clip (found + fixed 2026-07-18)
+
+**Found by running variant 3 with a real client product photo (a `.webp`).** Assembly failed: both `features_product` clips died after 3 attempts.
+
+- **Cause:** `types.Image.from_file()` infers MIME from Python's `mimetypes` registry, which **does not know `.webp` on Windows** → `mime_type=None` → the SDK omits `mimeType` → Veo returns `400 INVALID_ARGUMENT: "Image field doesn't have expected `bytesBase64Encoded` or `mimeType` fields"`. Every v4 test used PNG, so it never surfaced. `/api/uploads` accepts any `image/*`, and webp is the norm for product photography — so **any webp product reel was guaranteed to fail**.
+- **Fix:** `veo_generator.py` now resolves the MIME type from an explicit `MIME_BY_EXT` map and builds `types.Image(image_bytes=…, mime_type=…)` directly — no platform dependency. (`nanobanana_generator.py` already did this, which is exactly why the Route B composite succeeded while Veo failed.)
+- **Also fixed:** the SDK exception escaped as a **raw traceback** (not a `fail()` reason) and exited 1, so the adapter burned all 3 attempts on a permanent 400. `generate_videos()` and the poll are now wrapped → clean reason on stderr + **4xx (except 429) classified permanent** (exit 2, no retries).
+- **Verified:** identical call went `400` → **exit 0, 1.2 MB mp4**, product preserved, aac 48 kHz. Regression test added (`npm test` 32/32).
+
 ## 2b. E2E through the Studio — 2026-07-17
 
 Onboarding wizard driven start→finish on a throwaway clone of Kiran (`zz-e2e-test-delete-me`), then reels run through the real UI with real vendors. Test client + all assets deleted afterwards; only `kiran` remains.
@@ -89,7 +98,9 @@ Onboarding wizard driven start→finish on a throwaway clone of Kiran (`zz-e2e-t
 
 | # | Item | Why it's not closed |
 |---|---|---|
-| R11 | **Variant 6 never rendered** + **variant 3 (Route B) not yet run through the Studio.** | Both scheduled for the next Studio session. Route B mechanic already proven live (§R4); this is in-situ confirmation. |
+| ~~R11~~ | ~~Variant 6 never rendered + variant 3 not run through the Studio.~~ | ✅ **CLOSED 2026-07-18** — both rendered E2E through the Studio (§5). |
+| R13 | **A `product_image` still contributes silence to a no-VO concat reel.** Variant 6's first 5 s (the real photo) is silent by design (stills are padded with silence), so "product + music" starts quiet — mean −43.5 dB across the reel. | Working as designed, not a defect. If a fully-scored reel is wanted, either avoid `product_image` entries in no-VO reels or add a music bed (deferred feature). |
+| R14 | **`broll_frequency` selection can fail to persist.** Variant 3 run (2026-07-18): clicked "Minimal", job saved `"Standard"`; variant 6 run minutes later: "Minimal" persisted. Looks like a state race when the frequency chip is clicked immediately before the next-step button. | Cost-impact only (more clips than intended). Watch; if it recurs, read the chip state from the POST body rather than component state. |
 | R12 | **Veo's safety filter blocks some generated b-roll prompts** (hit on variant 3, 3/3 retries). Content outcome, not a bug — but it means a reel can legitimately fail and need a re-run. | Vendor behaviour. The creative-director KB prompt is the lever if it recurs. |
 | R6 | Veo 3.1 Fast returns **720×1280**, not 1080×1920; assembly upscales. | Vendor output size. Accepted. |
 | R7 | `acme-product-co` Cloudinary leftover (deleted client, 4 KB). | Needs the explicit `prefix` sweep. Run dry first. |
@@ -135,10 +146,6 @@ Route B is the only one that delivers both. (`cinematic_avatar` = Route A, produ
 
 **Remaining:** variant-3 reel through the Studio (part of the next session) to confirm the wiring in situ. The mechanic itself is proven above.
 
-**Avatar V (Avatar 5) — checked, does NOT change the fork.** Confirmed against `developers.heygen.com/avatar-v`: it's `type:'avatar'` + `engine:{type:'avatar_v'}` with **`script`+`voice_id`** (no `audio_url` documented — a mismatch with our ElevenLabs `audio_url` path). Its only reference inputs are **`motion_prompt`** and **`reference_look_id`** (another look of the *same* avatar) — **there is NO product/scene-image field in the API**. The "target scene image" on its marketing/research page is not an exposed API surface. It is **opt-in per look** (verify `avatar_v` in `supported_api_engines` via `GET /v3/avatars/looks/{id}`), $0.05/sec. Net: Avatar V is a higher-fidelity lip-sync engine only — it does not attach products, so it adds no "Route D".
-
-**Recommendation:** Route B. **Decision needed from you before any code:** A (product, no voice), B (both, extra generation step), or C (voice, product only in b-roll)? Nothing gets built until you pick.
-
 ## 4. Deferred (by decision — triggers in doc pack `03`)
 
 **`@google/generative-ai` (Node) is deprecated** — Python already uses the current `google-genai`. Works today; EOL risk. *Trigger: migrate to `@google/genai` before it breaks, or at the next Gemini change.* **Your call: log, don't migrate now.**
@@ -153,9 +160,9 @@ Also deferred: 2nd visual provider (Seedance **2.0** — 1.0 has no audio) · pe
 |---|---|---|---|
 | 1 | **Full Kiran reel (variant 1)** through the Studio | R1 + HeyGen avatar + overlay | ✅ **done** (§2b) |
 | 2 | **`product_promo` (variant 5)** | M1 fix end-to-end, R2, R3 | ✅ **done** (§2b) — 100% narration, product preserved |
-| 3 | **Variant 3 (avatar + product)** | Route B in situ (composite → `type:'image'` lip-sync). Mechanic already proven live (§R4). | ⬜ Studio run pending |
-| 4 | **Variant 6 (product + music)** | concat, no-VO path | ⬜ Studio run pending |
-| 5 | **Cleanup dry-run** (`{"apply": false}`) then R7 | Orphan predicate live. Read report before `apply:true`. | ⬜ not run |
+| 3 | **Variant 3 (avatar + product)** | Route B in situ (composite → `type:'image'` lip-sync). | ✅ **DONE 2026-07-18** — job `19dffe36`. Composite made (Kiran holding the real pickle bowl) → HeyGen `type:'image'` → **1080×1920, aac 48 kHz, 15.98 s** vs ~15 s narration. Timeline verified by frame: t=1 s avatar holding product (lip-synced), t=5 s real photo, t=9 s + t=13 s Veo clips with the product preserved. Surfaced + fixed **M12**. |
+| 4 | **Variant 6 (product + music)** | concat, no-VO path | ✅ **DONE 2026-07-18** — job `cd59e0d2`. Plan tiled **0→5→10→15, zero gaps**; reel **exactly 15.000 s**, 1080×1920, aac 44.1 kHz. Veo native audio present (mean −43.5 dB / max −9.5 dB). Product preserved in both generated clips. |
+| 5 | **Cleanup dry-run** (`{"apply": false}`) then R7 | Orphan predicate live. Read report before `apply:true`. | ✅ **done (v4.1)** — route invoked live; `kiran` clean (0 orphans); `acme-product-co` orphan confirmed (1 asset, **3989 B**, id `…/x8fslkx8qyd5h6jdaqvh`) at `olderThanDays:0`. Predicate sound (protects referenced + recent). `apply:true` delete **pending user** (permanent deletion). |
 
 ## 6. Watch
 
