@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from './clients/loadConfig';
+import { normalizeBrollFrequency } from './pipeline/broll';
 import { getJobStagePlan, resolveReelStages, validate, type StageName } from './pipeline/stages';
 
 // Job persistence: one row per reel, artifacts written as each stage completes.
@@ -26,6 +27,8 @@ export interface JobRow {
   editor_notes: string | null;
   speech_speed: number | null;
   product_image_urls: string[];
+  /** Per-reel: the uploaded product outranks the research doc for TOPIC choice. */
+  product_overrides_research: boolean;
   audio_url: string | null;
   audio_timestamps: unknown[] | null;
   avatar_video_url: string | null;
@@ -41,6 +44,13 @@ export interface JobRow {
 // a user edits by hand in the Studio. Stage progression, artifact URLs,
 // provider ids, stage_plan, pipeline binding are all SERVER-controlled and are
 // written via updateJobInternal from the stage routes only. (Hardening N1.)
+//
+// product_overrides_research is DELIBERATELY ABSENT. It is a per-reel BEHAVIOUR
+// flag, and the existing behaviour flag (stage_plan) is absent for the same
+// reason: allowing it here would let any authenticated user of the owning client
+// flip prompt weighting on an already-created reel and then have an admin retry
+// run under different weighting than the reel was ordered under. It is written
+// once, by createJob, and every consumer reads it off the row.
 const PATCHABLE_FIELDS = new Set([
   'topic',
   'template',
@@ -62,6 +72,8 @@ interface CreateJobOpts {
   voiceover?: boolean;          // per-reel; false skips adapt_voice/audio/avatar
   injectedScript?: string;      // per-reel; when set, drops topic/script
   productImageUrls?: string[];  // per-reel product photos (Cloudinary URLs)
+  brollFrequency?: string;      // per-reel label; normalised against the allowlist
+  productOverridesResearch?: boolean; // per-reel; topic-stage prompt weighting
   createdBy?: string;
 }
 
@@ -96,12 +108,23 @@ export async function createJob(clientId: string, opts: CreateJobOpts): Promise<
   const planErrors = validate(stagePlan, { scriptSupplied: injectScript });
   if (planErrors.length) throw new Error(`PLAN_INVALID: ${planErrors.join(' ')}`);
 
+  const productImageUrls = opts.productImageUrls ?? [];
   const insert: Record<string, unknown> = {
     client_id: clientId,
     pipeline_id: pipeline.id,
     stage_plan: stagePlan,
     current_stage: stagePlan[0],
-    product_image_urls: opts.productImageUrls ?? [],
+    product_image_urls: productImageUrls,
+    // Written HERE, at creation, not when broll_plan completes. The column
+    // defaults to 'Standard', so persisting late meant every read before the
+    // stage finished — resume, admin retry, the reel record itself — reported a
+    // frequency nobody chose.
+    broll_frequency: normalizeBrollFrequency(opts.brollFrequency),
+    // Only meaningful on a reel that actually has photos: the flag says the
+    // uploaded product outranks the research doc, and with no product there is
+    // nothing to outrank it with. Closes the "product pipeline, zero photos"
+    // case without a 400.
+    product_overrides_research: opts.productOverridesResearch === true && productImageUrls.length > 0,
     created_by: opts.createdBy ?? null,
   };
   if (injectScript) {

@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import { Copy, Sparkles, Edit3, Loader2, Undo2, Redo2, Eye, EyeOff } from 'lucide-react';
+import { Copy, Sparkles, Edit3, Loader2, Undo2, Redo2, Eye, EyeOff, TriangleAlert } from 'lucide-react';
 import { diffWords } from 'diff';
+import { estimateSpokenScript, checkDurationDeviation } from '@/lib/pipeline/duration';
 
 interface ScriptDisplayProps {
   clientId: string;
@@ -10,15 +11,31 @@ interface ScriptDisplayProps {
     template: string;
     hookType: string;
     severity: string;
+    /** The model's own self-report. Stale the moment anyone edits — deliberately NOT rendered. */
     wordCount: number;
+    /** Same: the model's claim, not a measurement. The header computes its own instead. */
     estimatedDuration: string;
     hasCTA: boolean;
     fullScript: string;
   };
+  /** What this reel was ordered at. null = nothing to compare against; claim nothing. */
+  targetDurationSec: number | null;
+  /** The client's configured pacing (clients.speech_words_per_sec), via ui-config. */
+  wordsPerSec: number;
+  /** Where targetDurationSec came from, so the header can label a stand-in as one. */
+  targetSource: 'reel' | 'pipeline-default' | 'none';
   onScriptUpdate?: (newScriptText: string) => void;
 }
 
-export default function ScriptDisplay({ clientId, jobId, script, onScriptUpdate }: ScriptDisplayProps) {
+export default function ScriptDisplay({
+  clientId,
+  jobId,
+  script,
+  targetDurationSec,
+  wordsPerSec,
+  targetSource,
+  onScriptUpdate,
+}: ScriptDisplayProps) {
   const [history, setHistory] = useState<string[]>([script.fullScript || ""]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [editValue, setEditValue] = useState(script.fullScript || "");
@@ -30,6 +47,23 @@ export default function ScriptDisplay({ clientId, jobId, script, onScriptUpdate 
     if (!showDiff) return [];
     return diffWords(history[0], editValue);
   }, [showDiff, history, editValue]);
+
+  // Measured from the LIVE edit buffer, never from script.wordCount /
+  // script.estimatedDuration — those are the model's unverified self-report and
+  // go stale the instant the user hand-trims. Recomputing here is what makes the
+  // flag clear without leaving the page.
+  const estimate = useMemo(
+    () => estimateSpokenScript(editValue, wordsPerSec),
+    [editValue, wordsPerSec]
+  );
+  // Two-sided: as wrong 8s under target as 8s over. INFORMATIONAL ONLY — it
+  // gates no button, no navigation and no stage call. Every re-run is the
+  // user's own call.
+  const durationDeviation = useMemo(
+    () => checkDurationDeviation(estimate.seconds, targetDurationSec),
+    [estimate.seconds, targetDurationSec]
+  );
+  const showTarget = targetSource !== 'none' && targetDurationSec !== null;
 
   const pushToHistory = (newText: string) => {
     const newHistory = history.slice(0, historyIndex + 1);
@@ -114,10 +148,24 @@ export default function ScriptDisplay({ clientId, jobId, script, onScriptUpdate 
         <div className="min-w-0">
           <h2 className="text-2xl font-bold gradient-text">Script Editor</h2>
           <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-400">
-            <span><strong>Words:</strong> {script.wordCount}</span>
-            <span><strong>Duration:</strong> {script.estimatedDuration}</span>
+            <span><strong>Words:</strong> {estimate.words}</span>
+            <span><strong>Duration:</strong> ~{estimate.seconds.toFixed(1)}s</span>
+            {showTarget && (
+              <span>
+                <strong>Target:</strong> {targetDurationSec}s
+                {targetSource === 'pipeline-default' && (
+                  <span className="text-gray-500"> (pipeline default)</span>
+                )}
+              </span>
+            )}
             <span className="break-words"><strong>Template:</strong> {script.template}</span>
           </div>
+          {durationDeviation && (
+            <p className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+              <span className="break-words">{durationDeviation}</span>
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button

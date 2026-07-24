@@ -7,7 +7,7 @@ import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getAvatarAdapter } from '@/lib/adapters/avatar';
 import { getVisualAdapter } from '@/lib/adapters/visual';
 import { getStorageAdapter } from '@/lib/adapters/storage';
-import { downloadToFile } from '@/lib/pipeline/assembly';
+import { downloadToFile, extensionFromUrl, extensionFromMimeType } from '@/lib/pipeline/download';
 import { getJob, startStage, completeStage, failStage, updateJobInternal, stageNotInPlan } from '@/lib/jobs';
 import type { ResolvedClient } from '@/lib/clients/types';
 
@@ -35,8 +35,26 @@ async function buildPresenterComposite(
     if (!presenterUrl) return null;
 
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'presenter-'));
-    const presenterPath = path.join(tempDir, 'presenter.jpg');
-    await downloadToFile(presenterUrl, presenterPath);
+
+    // The presenter still must be named for what it ACTUALLY is: the compositor
+    // resolves its MIME type from the file extension, so a hardcoded
+    // 'presenter.jpg' declares image/jpeg for every avatar — and HeyGen serves
+    // .webp for 3 of Kiran's 4. That is M12's exact shape (a webp declared jpeg),
+    // surviving only because Gemini is more lenient about it than Veo.
+    // URL extension first, then the response's own Content-Type; if neither is
+    // usable we THROW rather than guess — the catch below turns that into the
+    // graceful plain-talking-head downgrade, which is strictly better than a
+    // confidently wrong declaration.
+    const downloadPath = path.join(tempDir, 'presenter.download');
+    const { contentType } = await downloadToFile(presenterUrl, downloadPath);
+    const presenterExt = extensionFromUrl(presenterUrl) ?? extensionFromMimeType(contentType);
+    if (!presenterExt) {
+      throw new Error(
+        `Could not determine the presenter still's image format (URL "${presenterUrl}" carries no known image extension, Content-Type was "${contentType ?? 'none'}").`
+      );
+    }
+    const presenterPath = path.join(tempDir, `presenter${presenterExt}`);
+    fs.renameSync(downloadPath, presenterPath);
 
     const productPaths: string[] = [];
     for (const [i, url] of productUrls.slice(0, visual.maxReferenceImages).entries()) {

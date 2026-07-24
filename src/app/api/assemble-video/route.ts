@@ -6,9 +6,11 @@ import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getVisualAdapter } from '@/lib/adapters/visual';
 import { getStorageAdapter } from '@/lib/adapters/storage';
-import { downloadToFile, overlayBrolls, concatBrolls, type BrollPlacement } from '@/lib/pipeline/assembly';
+import { overlayBrolls, concatBrolls, type BrollPlacement } from '@/lib/pipeline/assembly';
+import { downloadToFile } from '@/lib/pipeline/download';
 import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 import { getJobStagePlan } from '@/lib/pipeline/stages';
+import { resolveOrderedDurationSec } from '@/lib/pipeline/duration';
 
 // POST /api/assemble-video — generate B-roll clips + stitch ('assemble' stage).
 // Two modes, chosen by the job's plan:
@@ -136,8 +138,15 @@ export async function POST(req: Request) {
 
     const outputPath = path.join(tempDir, 'final_output.mp4');
 
+    // Non-blocking notes about the finished reel. Per-run and not persisted: a
+    // resumed reel will not re-show them.
+    const warnings: string[] = [];
+
     if (overlayMode) {
       // Overlay B-roll onto the avatar base (preserves the avatar's audio).
+      // No duration guard here on purpose: an overlay gap is legitimate — the
+      // presenter shows through it — and keying a duration rule off the wrong
+      // axis is exactly what M1 was.
       const avatarPath = path.join(tempDir, 'avatar.mp4');
       await downloadToFile(avatarVideoUrl, avatarPath);
       await overlayBrolls(avatarPath, placements, outputPath);
@@ -149,7 +158,14 @@ export async function POST(req: Request) {
         await downloadToFile(job.audio_url, audioPath);
       }
       if (placements.length === 0) throw new Error('No B-roll clips were produced to assemble');
-      await concatBrolls(placements, { audioPath }, outputPath);
+      const concat = await concatBrolls(
+        placements,
+        // What this reel was ordered at, for the no-voiceover shortfall warning.
+        // The guard itself lives inside concatBrolls so it cannot be bypassed.
+        { audioPath, orderedDurationSec: resolveOrderedDurationSec(job, c.pipelines) },
+        outputPath
+      );
+      warnings.push(...concat.warnings);
     }
 
     const folderPrefix = c.storage.folderPrefix || c.slug;
@@ -160,7 +176,7 @@ export async function POST(req: Request) {
 
     await completeStage(jobId, 'assemble', { final_video_url: finalVideoUrl });
 
-    return NextResponse.json({ success: true, finalVideoUrl, failedClips });
+    return NextResponse.json({ success: true, finalVideoUrl, failedClips, warnings });
   } catch (error: any) {
     console.error('Assemble Error:', error);
     if (jobId) await failStage(jobId, 'assemble', error).catch(() => {});

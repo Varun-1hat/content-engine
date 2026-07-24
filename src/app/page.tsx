@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import ScriptDisplay from "@/components/ScriptDisplay";
-import { Sparkles, Loader2, UserCheck, ArrowRight, Edit3, Info, Video, Mic, Settings, Copy, History, Plus, LogOut, Upload, X, Package } from "lucide-react";
+import { Sparkles, Loader2, UserCheck, ArrowRight, Edit3, Info, Video, Mic, Settings, Copy, History, Plus, LogOut, Upload, X, Package, TriangleAlert } from "lucide-react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 import { stageLabel, statusLabel } from "@/lib/labels";
+import { BROLL_FREQUENCIES, DEFAULT_BROLL_FREQUENCY } from "@/lib/pipeline/broll";
 
 // All client-specific data (pipelines, templates, avatars) comes from
 // /api/clients/[id]/ui-config. Nothing client-specific is hardcoded.
@@ -29,12 +30,18 @@ interface UiConfig {
   localeLanguage: string;
   /** Max product photos this client's visual provider can use, per reel. */
   productImageLimit: number;
+  /** The client's duration -> word-count pacing, for the script length estimate. */
+  speechWordsPerSec: number;
+  /** The ONE photo-size limit, in whole raw MB: a per-reel total across all photos. */
+  productImagePayloadLimitMb: number;
   pipelines: UiPipeline[];
   templates: UiTemplate[];
   avatars: UiAvatar[];
 }
 
-const BROLL_OPTIONS = ["Minimal", "Standard", "High"];
+// Human labels, straight from the server-side allowlist so the two can't drift.
+// The Studio sends the label; the server resolves what it means.
+const BROLL_OPTIONS: readonly string[] = BROLL_FREQUENCIES;
 
 // Note: <body> is a flex column (layout.tsx), so every screen's root <main>
 // carries `w-full min-w-0` — a flex item's default min-width:auto refuses to
@@ -58,6 +65,10 @@ export default function Home() {
   const [injectMode, setInjectMode] = useState(false);
   const [injectedScript, setInjectedScript] = useState("");
   const [productUrls, setProductUrls] = useState<string[]>([]);
+  // Raw bytes of each uploaded photo, index-aligned with productUrls, so the
+  // per-reel TOTAL can be checked before anything is sent.
+  const [productBytes, setProductBytes] = useState<number[]>([]);
+  const [productOverridesResearch, setProductOverridesResearch] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
 
@@ -79,7 +90,7 @@ export default function Home() {
 
   // --- Production choices ---
   const [selectedAvatar, setSelectedAvatar] = useState("");
-  const [brollFrequency, setBrollFrequency] = useState("Standard");
+  const [brollFrequency, setBrollFrequency] = useState<string>(DEFAULT_BROLL_FREQUENCY);
   const [editorInstructions, setEditorInstructions] = useState("");
   const [globalSpeed] = useState("1.0");
 
@@ -99,6 +110,20 @@ export default function Home() {
   // --- Final assembly ---
   const [isAssembling, setIsAssembling] = useState(false);
   const [finalAssembledVideoUrl, setFinalAssembledVideoUrl] = useState<string | null>(null);
+  // Non-blocking notes from the assemble stage (e.g. a no-voiceover concat reel
+  // whose plan tiles less than the ordered duration). The reel still shipped.
+  // Per-run only — they are not stored on the row, so a resumed reel shows none.
+  const [assembleWarnings, setAssembleWarnings] = useState<string[]>([]);
+
+  // --- Architect "Continue" ---
+  // Held from the click itself. The paid stage dispatch sits behind an awaited
+  // PATCH, so isGeneratingAudio / isGeneratingVideoPipeline are not set until
+  // that round trip resolves — a second click inside that window would spend
+  // twice (two ElevenLabs renders, or two HeyGen/Veo pipeline runs). Its only
+  // writer is proceedFromArchitect, which clears it in a finally, so it cannot
+  // strand the button.
+  const [isProceeding, setIsProceeding] = useState(false);
+  const proceedBusy = isProceeding || isGeneratingAudio || isGeneratingVideoPipeline;
 
   const hasStage = (name: string) => activePlan.includes(name);
   const templatesByLabel: Record<string, UiTemplate> = Object.fromEntries(
@@ -117,6 +142,22 @@ export default function Home() {
   const showAudio = hasStage("audio");
   const showAssets = hasStage("avatar") || hasStage("broll_plan");
   const showFinal = hasStage("assemble");
+
+  // What this reel was ORDERED at, and where that number came from — the same
+  // precedence the server uses (the reel's own target, else the pipeline
+  // default, else nothing). Only a plan that runs the `script` stage records a
+  // target on the reel; a client-supplied or injected script never does, so
+  // those fall back to the pipeline default and say so rather than showing a
+  // number that looks recorded. Derived from the plan, never from a slug.
+  const parsedTargetDuration = parseInt(targetDuration, 10);
+  const reelTargetSec =
+    hasStage("script") && Number.isFinite(parsedTargetDuration) && parsedTargetDuration > 0
+      ? parsedTargetDuration
+      : null;
+  const pipelineDefaultSec = selectedPipeline?.duration.defaultSec ?? null;
+  const scriptTargetSec = reelTargetSec ?? pipelineDefaultSec;
+  const scriptTargetSource: "reel" | "pipeline-default" | "none" =
+    reelTargetSec !== null ? "reel" : pipelineDefaultSec !== null ? "pipeline-default" : "none";
 
   const stepperSteps = [
     ...(showTopic ? [{ num: 1, label: "Topic" }] : []),
@@ -195,6 +236,7 @@ export default function Home() {
     setAvatarVideoUrl(null);
     setBrollPlan(null);
     setFinalAssembledVideoUrl(null);
+    setAssembleWarnings([]);
   }
 
   function hydrateFromJob(job: any) {
@@ -203,6 +245,10 @@ export default function Home() {
     setActivePlan(plan);
     if (job.pipeline_id) setSelectedPipelineId(job.pipeline_id);
     setProductUrls(job.product_image_urls ?? []);
+    setProductBytes([]);
+    // Captured on the reel at creation, so a resumed reel and an admin retry
+    // both use the choice this reel was ordered under.
+    setProductOverridesResearch(!!job.product_overrides_research);
     setTopic(job.topic || "");
     if (job.target_duration_sec) setTargetDuration(String(job.target_duration_sec));
     if (job.english_script) setEnglishScript(job.english_script);
@@ -219,6 +265,9 @@ export default function Home() {
     setAvatarVideoUrl(job.avatar_video_url || null);
     setBrollPlan(job.broll_plan || null);
     setFinalAssembledVideoUrl(job.final_video_url || null);
+    // Assemble warnings are per-run and not persisted (R16) — never carry the
+    // previous reel's into this one.
+    setAssembleWarnings([]);
 
     // Land on the furthest screen this reel's artifacts support, clamped to
     // the stages this reel actually has.
@@ -251,6 +300,14 @@ export default function Home() {
     setInjectMode(false);
     setInjectedScript("");
     setProductUrls([]);
+    setProductBytes([]);
+    setProductOverridesResearch(false);
+    // A new reel starts from defaults like every other setup field — these three
+    // used to survive the previous reel, so an unchanged screen could hand the
+    // next reel someone else's choice.
+    setBrollFrequency(DEFAULT_BROLL_FREQUENCY);
+    setSelectedAvatar(client.avatars[0]?.label ?? "");
+    setTargetDuration(String(client.pipelines[0].duration.defaultSec));
     setStep(1);
     setInFlow(false);
     setSetupMode(true);
@@ -278,11 +335,30 @@ export default function Home() {
     if (picked.length > room) {
       alert(`Only ${room} more photo${room === 1 ? "" : "s"} can be added (limit ${limit} per reel). Taking the first ${room}.`);
     }
+    const incoming = picked.slice(0, room);
+
+    // ONE size limit, and it is a per-reel TOTAL: the script model receives every
+    // photo in a single request, so three photos that each pass on their own can
+    // still blow the request. Checked here, before anything is uploaded, against
+    // the same number stated above the picker and enforced by the upload route —
+    // a photo must never be accepted here and rejected for size by a stage.
+    const limitMb = client.productImagePayloadLimitMb;
+    const totalBytes = incoming.reduce(
+      (sum, f) => sum + f.size,
+      productBytes.reduce((sum, b) => sum + b, 0)
+    );
+    if (totalBytes > limitMb * 1024 * 1024) {
+      alert(
+        `These photos come to ${(totalBytes / 1024 / 1024).toFixed(1)} MB. A reel can carry ${limitMb} MB of product photos in total — remove one or use a smaller file.`
+      );
+      return;
+    }
 
     setIsUploading(true);
     try {
       const urls = [...productUrls];
-      for (const file of picked.slice(0, room)) {
+      const bytes = [...productBytes];
+      for (const file of incoming) {
         const fd = new FormData();
         fd.append("file", file);
         fd.append("clientId", client.id);
@@ -290,8 +366,10 @@ export default function Home() {
         const d = await res.json();
         if (!res.ok) throw new Error(d.error);
         urls.push(d.url);
+        bytes.push(file.size);
       }
       setProductUrls(urls);
+      setProductBytes(bytes);
     } catch (err: any) {
       alert("Product photo upload failed: " + err.message);
     } finally {
@@ -318,6 +396,11 @@ export default function Home() {
           voiceover: selectedPipeline.hasVoiceStages ? voiceover : true,
           injectedScript: willInject ? injectedScript : undefined,
           productImageUrls: productUrls,
+          // Both are settled HERE, at creation, so the row carries the user's
+          // choice from the instant it exists — not once a later stage happens
+          // to complete. Labels and booleans only; the server resolves them.
+          brollFrequency,
+          productOverridesResearch,
         }),
       });
       const data = await res.json();
@@ -480,10 +563,37 @@ export default function Home() {
     }
   };
 
+  // The frequency chip is still editable here — a production choice tuned after
+  // reading the script — so persist it before navigating on, exactly as
+  // persistScriptEdits does. broll_frequency is already on the PATCH allowlist.
+  // A failure is swallowed: the value still travels in the generate-broll-plan
+  // body, so the worst case is today's behaviour and the reel is never blocked.
+  const persistBrollFrequency = async () => {
+    if (!jobId || !hasStage("broll_plan")) return;
+    try {
+      await fetch(`/api/jobs/${jobId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ broll_frequency: brollFrequency }),
+      });
+    } catch {}
+  };
+
   // No-voiceover reels skip audio entirely and go straight to the visual stages.
-  const proceedFromArchitect = () => {
-    if (hasStage("audio")) handleGenerateAudio();
-    else handleGenerateVideoPipeline();
+  // isProceeding is raised BEFORE the awaited persist so the button is disabled
+  // from the click rather than from the PATCH's completion, and lowered in a
+  // finally that runs whether the persist rejects, a dispatched handler rejects,
+  // or a handler returns early before setting its own flag — so the button can
+  // never be double-fired and can never be left permanently disabled.
+  const proceedFromArchitect = async () => {
+    setIsProceeding(true);
+    try {
+      await persistBrollFrequency();
+      if (hasStage("audio")) await handleGenerateAudio();
+      else await handleGenerateVideoPipeline();
+    } finally {
+      setIsProceeding(false);
+    }
   };
 
   const handleGenerateVideoPipeline = async () => {
@@ -533,6 +643,7 @@ export default function Home() {
     if (!client) return;
     setIsAssembling(true);
     setFinalAssembledVideoUrl(null);
+    setAssembleWarnings([]);
     try {
       const assembleRes = await fetch("/api/assemble-video", {
         method: "POST",
@@ -542,6 +653,9 @@ export default function Home() {
       const assembleData = await assembleRes.json();
       if (!assembleData.success) throw new Error(assembleData.error);
       setFinalAssembledVideoUrl(assembleData.finalVideoUrl);
+      // The reel shipped — these are notes, not failures, so they are shown on
+      // the Final screen rather than raised as an alert.
+      setAssembleWarnings(assembleData.warnings ?? []);
       setStep(6);
     } catch (err: any) {
       alert("Assembly Failed: " + err.message);
@@ -719,20 +833,63 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Product priority — offered only once photos are actually
+                  attached, since there is nothing to prioritise without them. */}
+              {productUrls.length > 0 && (
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-white font-semibold text-sm">Make this reel about the product</p>
+                    <p className="text-gray-500 text-xs mt-1">
+                      The uploaded product takes priority over the research doc&apos;s usual topics when the topics are suggested. Everything else is unchanged — templates, hooks and closes still come from the research doc.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setProductOverridesResearch(!productOverridesResearch)}
+                    className={`shrink-0 px-4 py-2 rounded-lg border font-semibold text-sm transition-all ${productOverridesResearch ? "bg-green-500/20 text-green-400 border-green-500/40" : "bg-gray-800/40 text-gray-400 border-gray-700"}`}
+                  >
+                    {productOverridesResearch ? "ON" : "OFF"}
+                  </button>
+                </div>
+              )}
+
+              {/* B-roll frequency — recorded on the reel at creation, so the row
+                  reads the user's choice before any stage has run. Only offered
+                  when this pipeline actually plans B-roll. */}
+              {pipelineHasStage(selectedPipeline, "broll_plan") && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">B-roll frequency</label>
+                  <p className="text-gray-500 text-xs mb-3">How densely this reel cuts to B-roll. You can still change it in the Architect room after reading the script.</p>
+                  <div className="flex gap-3 sm:gap-4 flex-wrap">
+                    {BROLL_OPTIONS.map((freq) => (
+                      <button
+                        key={freq}
+                        onClick={() => setBrollFrequency(freq)}
+                        className={`flex-1 min-w-[6rem] py-3 rounded-lg border transition-all font-semibold ${brollFrequency === freq ? "bg-primary text-white border-primary shadow-lg" : "bg-gray-800/40 text-gray-400 border-gray-700 hover:border-gray-500"}`}
+                      >
+                        {freq}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Per-reel product photos */}
               {selectedPipeline.productInput && (
                 <div>
                   <label className="block text-xs font-bold text-gray-400 uppercase mb-2">
                     Product photos <span className="text-gray-600 normal-case font-normal">({productUrls.length}/{client.productImageLimit})</span>
                   </label>
-                  <p className="text-gray-500 text-xs mb-3">Uploaded per reel — used as reference for this generation only. Nothing is saved to the client. Up to {client.productImageLimit} per reel; every photo you add is used.</p>
+                  <p className="text-gray-500 text-xs mb-3">Uploaded per reel — used as reference for this generation only. Nothing is saved to the client. Up to {client.productImageLimit} per reel; every photo you add is used. Photos may total up to {client.productImagePayloadLimitMb} MB for the whole reel.</p>
                   <div className="flex flex-wrap gap-3 mb-3">
                     {productUrls.map((u, i) => (
                       <div key={i} className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-700">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={u} alt={`Product ${i + 1}`} className="w-full h-full object-cover" />
                         <button
-                          onClick={() => setProductUrls(productUrls.filter((_, j) => j !== i))}
+                          onClick={() => {
+                            setProductUrls(productUrls.filter((_, j) => j !== i));
+                            setProductBytes(productBytes.filter((_, j) => j !== i));
+                          }}
                           className="absolute top-0.5 right-0.5 bg-black/70 rounded-full p-0.5 text-gray-300 hover:text-white"
                         >
                           <X size={12} />
@@ -1115,6 +1272,9 @@ export default function Home() {
                  clientId={client.id}
                  jobId={jobId}
                  script={finalScript}
+                 targetDurationSec={scriptTargetSec}
+                 wordsPerSec={client.speechWordsPerSec}
+                 targetSource={scriptTargetSource}
                  onScriptUpdate={(newText) => setFinalScript({ ...finalScript, fullScript: newText })}
                />
                <div className="mt-8 pt-8 border-t border-gray-800">
@@ -1231,13 +1391,13 @@ export default function Home() {
             <div className="pt-6 border-t border-gray-800">
               <button
                 onClick={proceedFromArchitect}
-                disabled={isGeneratingAudio || isGeneratingVideoPipeline}
+                disabled={proceedBusy}
                 className="w-full py-4 bg-primary hover:bg-primary-hover text-white rounded-xl font-extrabold text-lg flex justify-center items-center gap-3 transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)] disabled:opacity-50"
               >
-                {(isGeneratingAudio || isGeneratingVideoPipeline) ? <Loader2 className="animate-spin" size={20} /> : <Mic size={20} />}
+                {proceedBusy ? <Loader2 className="animate-spin" size={20} /> : <Mic size={20} />}
                 {showAudio
-                  ? (isGeneratingAudio ? "Directing Voice & Rendering Audio..." : "Generate Audio")
-                  : (isGeneratingVideoPipeline ? "Planning Visuals (this takes a few mins)..." : "Continue to Assets")}
+                  ? (proceedBusy ? "Directing Voice & Rendering Audio..." : "Generate Audio")
+                  : (proceedBusy ? "Planning Visuals (this takes a few mins)..." : "Continue to Assets")}
               </button>
             </div>
           </div>
@@ -1272,6 +1432,7 @@ export default function Home() {
                 {hasStage("broll_plan") && <li><strong>B-Roll Frequency:</strong> {brollFrequency}</li>}
                 {hasStage("broll_plan") && <li className="break-words"><strong>Editor Notes:</strong> {editorInstructions || 'None'}</li>}
                 {productUrls.length > 0 && <li><strong>Product Photos:</strong> {productUrls.length}</li>}
+                {productUrls.length > 0 && <li><strong>Product priority:</strong> {productOverridesResearch ? 'On' : 'Off'}</li>}
               </ul>
             </div>
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 flex flex-col h-full">
@@ -1407,6 +1568,20 @@ export default function Home() {
           </div>
 
           <div className="space-y-4">
+            {/* The reel SHIPPED — these are notes about what it came out like,
+                not failures, so they inform rather than interrupt. */}
+            {assembleWarnings.length > 0 && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-300">
+                <p className="font-semibold flex items-center gap-2">
+                  <TriangleAlert size={16} className="shrink-0" /> Worth a look before you publish
+                </p>
+                <ul className="list-disc pl-6 mt-2 space-y-1">
+                  {assembleWarnings.map((w, i) => (
+                    <li key={i} className="break-words">{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {finalAssembledVideoUrl ? (
               <video src={finalAssembledVideoUrl} controls autoPlay className="w-full rounded-xl border border-gray-700 shadow-xl" />
             ) : (

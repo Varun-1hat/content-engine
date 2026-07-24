@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { resolveOrderedDurationSec, wordBudgetFor } from '@/lib/pipeline/duration';
 import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 
 // POST /api/generate-hinglish — the voice-adaptation stage ('adapt_voice').
@@ -32,6 +33,25 @@ export async function POST(req: Request) {
     const c = await loadClientConfig(clientId);
     await startStage(jobId, 'adapt_voice');
 
+    // The stage that adapts the script had no idea how long the reel was ordered
+    // to be, so a 20s reel could come back at ~65s of speech. State the target
+    // and the word budget it implies, at the client's configured pacing.
+    //
+    // It is a CONSTRAINT on the output, not a second output contract: the voice
+    // prompt (KB) already defines the JSON shape and its own length guidance, and
+    // two contracts in one prompt is how they start disagreeing.
+    //
+    // Omitted entirely when nothing recorded a duration (no target on the reel,
+    // no pipeline default) — an invented target is worse than none.
+    const orderedDurationSec = resolveOrderedDurationSec(job, c.pipelines);
+    const durationBlock =
+      orderedDurationSec === null
+        ? ''
+        : `
+
+DURATION CONSTRAINT:
+This reel was ordered at ${orderedDurationSec} seconds of speech. At ${c.speechWordsPerSec} spoken words per second that is about ${wordBudgetFor(orderedDurationSec, c.speechWordsPerSec)} words. Keep the adapted script within that budget — tighten and compress rather than adding material, and do not pad to reach it. This is a length constraint on the output defined above; it does not change that output's format.`;
+
     const prompt = `${c.voicePrompt}
 
 === TASK ===
@@ -39,7 +59,7 @@ Adapt the following English script into ${c.displayName}'s voice and style, foll
 Original Topic: "${topic || 'N/A'}"
 
 Base English Script:
-${englishScript}
+${englishScript}${durationBlock}
 
 Output strictly valid JSON only, exactly matching the required output format defined above. Do not wrap in markdown blocks.`;
 

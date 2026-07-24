@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { getVisualAdapter } from '@/lib/adapters/visual';
 import { getJob, stageNotInPlan } from '@/lib/jobs';
-import { productBlock, fetchProductImages } from '@/lib/pipeline/product';
+import { productBlock, productPrecedenceBlock, fetchProductImages } from '@/lib/pipeline/product';
 
 // POST /api/generate-topic
 // Body: { clientId, jobId, query? }
@@ -35,7 +36,13 @@ export async function POST(req: Request) {
       ? `\n\n=== PREVIOUSLY PUBLISHED (avoid repeating these topics/angles) ===\n${c.pastContent}`
       : '';
 
-    const prompt = `${c.researchDoc}${pastContentBlock}${productBlock(job)}
+    // The precedence clause is read off the JOB ROW, never from the request
+    // body: it is a per-reel choice captured when the reel was created, so a
+    // retry or a resume uses the choice the reel was ordered under. It sits
+    // after productBlock so it qualifies the product context it refers to, and
+    // the research doc above it stays in full — this changes which topic wins a
+    // disagreement, it does not remove anything from the prompt.
+    const prompt = `${c.researchDoc}${pastContentBlock}${productBlock(job)}${productPrecedenceBlock(job)}
 
 === TASK ===
 Based on the research document above and the current date/season (${currentMonth}), generate 3 highly viral reel topics for ${c.displayName}.
@@ -71,12 +78,19 @@ Output Format:
   }
 ]`;
 
-    const raw = await getScriptAdapter(c.script.provider).generate({
+    // Both caps come from the adapters that actually have them: the visual
+    // provider decides how many photos are usable, the script model decides how
+    // many raw bytes it will take in one request.
+    const script = getScriptAdapter(c.script.provider);
+    const raw = await script.generate({
       prompt,
       model: c.script.structuredModel,
       fallbackModel: c.script.fallbackModel,
       json: true,
-      images: await fetchProductImages(job),
+      images: await fetchProductImages(job, {
+        maxImages: getVisualAdapter(c.visual.provider).maxReferenceImages,
+        maxTotalBytes: script.maxInlineImagePayloadBytes,
+      }),
     });
 
     const topics = extractJson<unknown[]>(raw);

@@ -19,6 +19,9 @@
 //     that cannot accept image input must THROW, not silently drop them — a
 //     prompt that describes attached photos to a blind model produces confident
 //     fiction about a product nobody uploaded.
+//   - maxInlineImagePayloadBytes is the provider's own number. Caps belong to
+//     the model that has them, never to a shared constant: adding a provider
+//     must bring its own ceiling rather than inherit someone else's.
 // =============================================================================
 
 /** An image supplied to the model as inline data (product photos, references). */
@@ -40,5 +43,16 @@ export interface ScriptGenerateOptions {
 }
 
 export interface ScriptAdapter {
+  /**
+   * The largest TOTAL of RAW image bytes this provider accepts alongside one
+   * prompt — the whole reel's photos added together, not per image. Per-image is
+   * the wrong axis: several individually-legal photos can still blow a
+   * whole-request ceiling.
+   *
+   * Stated in raw bytes (what a user sees on disk) so the Studio can print a
+   * number they can check their own files against, and so the number the Studio
+   * prints is the number that is enforced.
+   */
+  maxInlineImagePayloadBytes: number;
   generate(opts: ScriptGenerateOptions): Promise<string>;
 }

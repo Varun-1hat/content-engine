@@ -15,7 +15,14 @@ import time
 from google import genai
 from google.genai import types
 
-from generators.base import fail, load_env, parse_cli_args
+from generators.base import (
+    describe_api_error,
+    fail,
+    is_retryable_api_error,
+    load_env,
+    parse_cli_args,
+    reference_mime_type,
+)
 
 # Veo 3.1 accepts at most 3 asset reference images.
 # https://ai.google.dev/gemini-api/docs/veo
@@ -32,30 +39,9 @@ POLL_INTERVAL_SECONDS = 15
 MAX_POLL_SECONDS = 900
 
 
-# Extension -> MIME, resolved here rather than by the platform.
-#
-# types.Image.from_file() infers the MIME type from Python's `mimetypes`
-# registry, which does NOT know .webp on many systems (Windows in particular):
-# it returns None, the SDK then omits `mimeType` from the payload, and Veo
-# rejects the whole call with
-#   400 INVALID_ARGUMENT "Image field doesn't have expected `bytesBase64Encoded`
-#   or `mimeType` fields".
-# Product photos are whatever the client uploaded and /api/uploads accepts any
-# image/* — webp is the norm for product photography — so a platform-dependent
-# guess would fail EVERY product clip for those reels. nanobanana_generator.py
-# already maps the type explicitly; Veo must too.
-MIME_BY_EXT = {
-    ".png": "image/png",
-    ".webp": "image/webp",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-}
-DEFAULT_REFERENCE_MIME = "image/jpeg"
-
-
-def reference_mime_type(path):
-    return MIME_BY_EXT.get(os.path.splitext(path)[1].lower(), DEFAULT_REFERENCE_MIME)
+# reference_mime_type (M12: never let the platform guess .webp) and the API-error
+# classification below it are imported from generators.base — nanobanana needs
+# both too, and one copy is the point of the shared contract module.
 
 
 def build_reference_images(paths, output_filename):
@@ -103,34 +89,6 @@ def describe_filtered(response):
         detail = "; ".join(str(r) for r in reasons) if reasons else "no reason given"
         return f"blocked by Veo's safety filter ({count} filtered) — {detail}"
     return None
-
-
-def api_error_status(err):
-    """HTTP status carried by a google-genai APIError, when there is one."""
-    for attr in ("code", "status_code"):
-        value = getattr(err, attr, None)
-        if isinstance(value, int):
-            return value
-    return None
-
-
-def describe_api_error(err):
-    """One readable line for a vendor SDK exception."""
-    status = api_error_status(err)
-    message = getattr(err, "message", None) or str(err)
-    return f"HTTP {status}: {message}" if status else str(message)
-
-
-def is_retryable_api_error(err):
-    """A 4xx (other than 429) is a contract/config error: the identical request
-    will be rejected again, so retrying only burns time and spend. 429 and 5xx
-    and transport failures may clear on their own."""
-    status = api_error_status(err)
-    if status is None:
-        return True
-    if status == 429:
-        return True
-    return not (400 <= status < 500)
 
 
 def generate(prompt, negative_prompt, output_filename, model=None, reference_paths=None):

@@ -76,6 +76,22 @@ test('injectScript=true drops topic and script', () => {
   assert.ok(!r.includes('topic') && !r.includes('script'));
 });
 
+test('the product-override toggle is not a stage axis — it changes prompt weighting only', () => {
+  // product_overrides_research is a job COLUMN the topic prompt reads. The stage
+  // axes are exactly voiceover and injectScript; nothing else may subtract a
+  // stage. Pinned on every preset, and on the read-back path too: a row that
+  // carries the flag resolves to the same plan.
+  for (const p of PIPELINE_PRESETS) {
+    const base = resolveReelStages(p.stages);
+    assert.deepEqual(resolveReelStages(p.stages, {}), base, `preset ${p.key} changed shape`);
+
+    const rowWithFlag = { stage_plan: base, product_overrides_research: true };
+    const rowWithout = { stage_plan: base, product_overrides_research: false };
+    assert.deepEqual(getJobStagePlan(rowWithFlag), base);
+    assert.deepEqual(getJobStagePlan(rowWithFlag), getJobStagePlan(rowWithout));
+  }
+});
+
 // --- normalizeStages / getJobStagePlan / nextStage --------------------------
 test('normalizeStages dedupes and sorts into canonical order', () => {
   assert.deepEqual(normalizeStages(['assemble', 'topic', 'topic', 'audio']), ['topic', 'audio', 'assemble']);

@@ -1,0 +1,77 @@
+#!/bin/sh
+#
+# pre-commit — refuse any commit that stages a secret-bearing file.
+#
+# This repo's live credentials (Supabase secret key, Gemini, ElevenLabs, HeyGen,
+# Cloudinary, Veo) sit in .env and are read from the environment at runtime.
+# .gitignore already covers them, but `git add -f` walks straight past .gitignore
+# and a committed secret is permanent: rewriting history does not un-leak it, and
+# the only real cleanup is rotating every key.
+#
+# Blocks:  *.env  *.env.*  *.key  *.pem  secrets.json
+# Allows:  *.example  *.sample  *.template  *.dist   (redacted stand-ins)
+#
+# Installed via:  git config core.hooksPath .claude/hooks
+
+# Staged files only: Added, Copied, Modified, Renamed.
+# The loop runs in a subshell, so its findings come back via stdout rather than
+# a variable. IFS is cleared so spaces in a path survive intact.
+blocked=$(git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r file; do
+    [ -z "$file" ] && continue
+
+    # Redacted stand-ins are the whole point of committing a template.
+    case "$file" in
+        *.example|*.sample|*.template|*.dist) continue ;;
+    esac
+
+    reason=""
+    case "$file" in
+        *.env|*.env.*)
+            reason="environment file — this is where real API keys live" ;;
+        *.key)
+            reason="private key" ;;
+        *.pem)
+            reason="private key or certificate" ;;
+        secrets.json|*/secrets.json)
+            reason="secrets file" ;;
+    esac
+
+    [ -n "$reason" ] && printf '  %s\n      -> %s\n' "$file" "$reason"
+done)
+
+[ -z "$blocked" ] && exit 0
+
+cat >&2 <<BANNER
+
+===============================================================
+  COMMIT BLOCKED — secret-bearing file(s) staged
+===============================================================
+
+These staged files must never enter git history:
+
+$blocked
+
+WHY THIS IS BLOCKED
+  A secret in a commit is permanent. Deleting it in a later commit
+  leaves it in the history, and anyone with the repo can read it.
+  The only true cleanup is rotating every exposed key — Supabase,
+  Gemini, ElevenLabs, HeyGen, Cloudinary and Veo, in this repo's case.
+
+HOW TO PROCEED
+  1. Unstage it:          git restore --staged <file>
+  2. Confirm it's ignored: git check-ignore -v <file>
+     (.gitignore already covers .env*, *.pem and .venv/ — a staged
+      match usually means it was force-added with 'git add -f')
+  3. Need it in the repo? Commit a redacted copy instead, named
+     <file>.example — templates are allowed through this hook.
+
+If you are certain a flagged file holds no live credentials, bypass
+this check deliberately:
+
+     git commit --no-verify
+
+===============================================================
+
+BANNER
+
+exit 1

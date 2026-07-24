@@ -107,6 +107,46 @@ test('Veo reference images resolve an explicit MIME type per extension (webp inc
   assert.equal(res.stdout.trim(), 'image/webp image/png image/jpeg image/jpeg');
 });
 
+test('nano banana resolves the SAME explicit MIME map (presenter stills are webp)', () => {
+  // HeyGen serves .webp for 3 of the 4 configured avatars, and the presenter
+  // still is handed to this generator as a file — so the type it declares comes
+  // from the extension. An inline ternary here (or a hardcoded presenter.jpg
+  // upstream) declares image/jpeg for a webp: M12's exact shape, one file over.
+  // Importable via the shared generators.base, so both generators agree.
+  const libPath = LIB.replace(/\\/g, '/');
+  const code = [
+    'import sys',
+    `sys.path.insert(0, "${libPath}")`,
+    'from nanobanana_generator import reference_mime_type',
+    'print(reference_mime_type("a.webp"), reference_mime_type("b.PNG"), reference_mime_type("c.jpeg"), reference_mime_type("d.bin"))',
+  ].join('\n');
+  const res = spawnSync(PY, ['-c', code], { cwd: CWD, env: NO_KEY_ENV, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'image/webp image/png image/jpeg image/jpeg');
+});
+
+test('is_retryable_api_error: 4xx (except 429) is permanent, everything else retries', () => {
+  // The adapter spends 3 attempts on a retryable failure. A 400 from the vendor
+  // is a contract/config error — the identical request is rejected identically,
+  // so retrying only burns time. 429 and 5xx and anything unclassifiable may
+  // clear on their own. (A CONTENT refusal is a different thing and stays
+  // retryable — that is evidence-based and is NOT what this classifies.)
+  const libPath = LIB.replace(/\\/g, '/');
+  const code = [
+    'import sys',
+    `sys.path.insert(0, "${libPath}")`,
+    'from generators.base import is_retryable_api_error',
+    'class ApiErr(Exception):',
+    '    def __init__(self, code): self.code = code',
+    'print(is_retryable_api_error(ApiErr(400)), is_retryable_api_error(ApiErr(404)), '
+      + 'is_retryable_api_error(ApiErr(429)), is_retryable_api_error(ApiErr(500)), '
+      + 'is_retryable_api_error(Exception("connection reset")))',
+  ].join('\n');
+  const res = spawnSync(PY, ['-c', code], { cwd: CWD, env: NO_KEY_ENV, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'False False True True True');
+});
+
 test('base64 prompt round-trips through the shared CLI parser (no crash on decode)', () => {
   // A prompt with quotes/newlines must survive --base64; it still refuses on the
   // --ref contract, proving the arg was parsed, not that a real call happened.

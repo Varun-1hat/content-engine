@@ -29,8 +29,9 @@ exact CLI contract so the adapter (or a new visual adapter) can call it:
     are a local-dev fallback only. Hard-fail with a clear message if unset.
   - Output must be 9:16 (1080x1920) — vertical reels are the product.
 
-Existing implementations: veo_generator.py (video), imagen_generator.py (image).
-Import from this module in new generators; the existing two predate it.
+Existing implementations: veo_generator.py (video), imagen_generator.py (image),
+nanobanana_generator.py (reference-conditioned stills + presenter composites).
+Import from this module in new generators; do not re-implement any of it.
 """
 
 import base64
@@ -119,3 +120,68 @@ def parse_cli_args():
         negative_prompt = base64.b64decode(negative_prompt).decode("utf-8")
 
     return prompt, negative_prompt, output_filename, model, reference_images
+
+
+# --- Reference-image MIME resolution (shared: M12) ---------------------------
+#
+# Extension -> MIME, resolved HERE rather than by the platform.
+#
+# types.Image.from_file() (and anything else leaning on Python's `mimetypes`
+# registry) does NOT know .webp on many systems, Windows in particular: it
+# returns None, the SDK then omits `mimeType` from the payload, and Veo rejects
+# the whole call with
+#   400 INVALID_ARGUMENT "Image field doesn't have expected `bytesBase64Encoded`
+#   or `mimeType` fields".
+# Product photos are whatever the client uploaded and /api/uploads accepts any
+# image/* — webp is the norm for product photography, and HeyGen serves webp
+# presenter stills — so a platform-dependent guess fails real reels. Every
+# generator that hands an image to a model resolves the type from this map.
+MIME_BY_EXT = {
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+}
+DEFAULT_REFERENCE_MIME = "image/jpeg"
+
+
+def reference_mime_type(path):
+    """The MIME type for a local image file, from its extension only."""
+    return MIME_BY_EXT.get(os.path.splitext(path)[1].lower(), DEFAULT_REFERENCE_MIME)
+
+
+# --- Vendor API error classification (shared: M12b) --------------------------
+
+
+def api_error_status(err):
+    """HTTP status carried by a google-genai APIError, when there is one."""
+    for attr in ("code", "status_code"):
+        value = getattr(err, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def describe_api_error(err):
+    """One readable line for a vendor SDK exception."""
+    status = api_error_status(err)
+    message = getattr(err, "message", None) or str(err)
+    return f"HTTP {status}: {message}" if status else str(message)
+
+
+def is_retryable_api_error(err):
+    """A 4xx (other than 429) is a contract/config error: the identical request
+    will be rejected again, so retrying only burns time and spend. 429 and 5xx
+    and transport failures may clear on their own, and so does anything we
+    cannot classify — assume transient rather than give up on a live call.
+
+    This classifies the API's own answer. A CONTENT refusal (the model returned
+    no media) is a different thing and stays retryable: those are not reliably
+    deterministic and a rejected generation is not billed."""
+    status = api_error_status(err)
+    if status is None:
+        return True
+    if status == 429:
+        return True
+    return not (400 <= status < 500)

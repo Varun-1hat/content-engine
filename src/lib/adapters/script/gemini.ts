@@ -26,9 +26,20 @@ async function callModel(genAI: GoogleGenerativeAI, model: string, opts: ScriptG
   return result.response.text();
 }
 
+// Gemini's documented ceiling is 20 MB for the WHOLE request — prompt text,
+// system instruction and every inline image together — not per image
+// (ai.google.dev/gemini-api/docs/image-understanding). Inline images travel
+// base64-encoded, which inflates them by 4/3, so 12 MB of raw photo bytes is
+// ~16 MB on the wire and leaves ~4 MB of the 20 MB for the prompt and the KB
+// prose that ships with it. Raw bytes, because that is what a user can measure
+// on their own files.
+const MAX_INLINE_IMAGE_PAYLOAD_BYTES = 12 * 1024 * 1024;
+
 // Replaces the five drifted copies of the Gemini call:
 // retry(3, 1s) on the primary model, then one shot on the fallback model.
 export const geminiScriptAdapter: ScriptAdapter = {
+  maxInlineImagePayloadBytes: MAX_INLINE_IMAGE_PAYLOAD_BYTES,
+
   async generate(opts) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY is not set');

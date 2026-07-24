@@ -1,31 +1,17 @@
 import fs from 'fs';
 import { getFfmpeg, hasAudioStream, getDurationSeconds } from './ffmpeg';
-import { checkNarrationCoverage } from './coverage';
+import { checkNarrationCoverage, checkOrderedDurationCoverage } from './coverage';
 
-// Vendor-free assembly: download helper + ffmpeg overlay/stitch logic.
+// Vendor-free assembly: ffmpeg overlay/stitch logic.
 // Extracted from assemble-video/route.ts unchanged in behavior.
+// (The download helper lives in ./download — this module imports ffmpeg at load,
+// which would make the download path untestable from the lean test suite.)
 
 export interface BrollPlacement {
   localPath: string;
   start: number;
   end: number;
   isImage: boolean;
-}
-
-/** Stream a remote file to disk without buffering it in memory. */
-export async function downloadToFile(url: string, destPath: string): Promise<void> {
-  const res = await fetch(url);
-  if (!res.ok || !res.body) throw new Error(`Failed to download ${url} (${res.status})`);
-
-  const fileStream = fs.createWriteStream(destPath);
-  const reader = res.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    fileStream.write(value);
-  }
-  fileStream.end();
-  await new Promise<void>((resolve) => fileStream.on('finish', () => resolve()));
 }
 
 /**
@@ -116,8 +102,17 @@ const AUDIO_FORMAT = `aformat=sample_rates=${AUDIO_RATE}:channel_layouts=${AUDIO
 // amplitude multiplier: 1.0 leaves the bed untouched, 0 silences it.
 const DUCK_UNDER_VOICEOVER = 0.18;
 
-// The narration-coverage guard (MIN_NARRATION_COVERAGE) lives in ./coverage so it
-// can be unit-tested without ffmpeg — see checkNarrationCoverage, used below.
+// The duration guards (MIN_NARRATION_COVERAGE / MIN_ORDERED_DURATION_COVERAGE)
+// live in ./coverage so they can be unit-tested without ffmpeg — see
+// checkNarrationCoverage and checkOrderedDurationCoverage, both used below.
+
+export interface ConcatResult {
+  /**
+   * Non-blocking notes about the finished reel (currently: the plan under-tiled
+   * the ordered duration on a no-voiceover reel). The reel still shipped.
+   */
+  warnings: string[];
+}
 
 /**
  * Concatenate B-roll clips into a single 1080x1920 video — the assembly path
@@ -128,12 +123,17 @@ const DUCK_UNDER_VOICEOVER = 0.18;
  * no audio stream of their own — stills, product photos — are padded with
  * silence so the concat filter sees a uniform stream count. When a voiceover is
  * supplied it is mixed on top and the clip audio is ducked beneath it.
+ *
+ * `orderedDurationSec` is what the reel was ordered at (resolveOrderedDurationSec
+ * in ./duration), or null/undefined when nothing recorded one. It is only used by
+ * the no-voiceover guard below.
  */
 export async function concatBrolls(
   clips: BrollPlacement[],
-  opts: { audioPath?: string },
+  opts: { audioPath?: string; orderedDurationSec?: number | null },
   outputPath: string
-): Promise<void> {
+): Promise<ConcatResult> {
+  const warnings: string[] = [];
   const ffmpeg = getFfmpeg();
   const usable = clips
     .filter((c) => c.localPath && fs.existsSync(c.localPath))
@@ -167,6 +167,16 @@ export async function concatBrolls(
     const narrationSec = await getDurationSeconds(opts.audioPath);
     const coverageError = checkNarrationCoverage(durations, narrationSec);
     if (coverageError) throw new Error(coverageError);
+  } else {
+    // No voiceover: there is no narration to measure against, so the ordered
+    // duration is the only statement of how long this reel was meant to be.
+    // Judged HERE, inside concat, so it cannot be bypassed by a caller (M1b) —
+    // and only here, so overlay mode never sees it (an overlay gap is legal, the
+    // avatar shows through it). Warns rather than throws: the reel ships.
+    // The two arms are exclusive on purpose — a voiceover concat reel is judged
+    // against its real narration end, never against the ordered duration too.
+    const shortfall = checkOrderedDurationCoverage(durations, opts.orderedDurationSec);
+    if (shortfall) warnings.push(shortfall);
   }
 
   // Silence inputs for the segments that have no audio of their own.
@@ -222,7 +232,7 @@ export async function concatBrolls(
     audioOut = '[amixed]';
   }
 
-  return new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     command
       .complexFilter(complexFilter, [])
       .outputOptions(['-map', '[vout]', '-map', audioOut, '-shortest', '-y'])
@@ -235,4 +245,6 @@ export async function concatBrolls(
       })
       .save(outputPath);
   });
+
+  return { warnings };
 }

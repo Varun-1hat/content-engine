@@ -28,7 +28,14 @@ import sys
 from google import genai
 from google.genai import types
 
-from generators.base import fail, load_env, parse_cli_args
+from generators.base import (
+    describe_api_error,
+    fail,
+    is_retryable_api_error,
+    load_env,
+    parse_cli_args,
+    reference_mime_type,
+)
 
 # Only used when --model is absent; the id lives in DB config
 # (clients.model_visual_product_image) per migration 0005.
@@ -82,15 +89,17 @@ def load_reference_parts(paths, output_filename):
     A missing file is fatal: generating without the references would produce a
     fictional product, which is worse than a failed stage because nothing
     downstream can detect it.
+
+    The MIME type comes from the shared reference_mime_type (generators.base) —
+    the same map Veo uses, so a presenter still or a product photo declares one
+    format to both models rather than two.
     """
     parts = []
     for p in paths:
         if not os.path.exists(p):
             fail(output_filename, f"reference image not found: {p}", retryable=False)
-        ext = os.path.splitext(p)[1].lower()
-        mime = "image/png" if ext == ".png" else "image/webp" if ext == ".webp" else "image/jpeg"
         with open(p, "rb") as f:
-            parts.append(types.Part.from_bytes(data=f.read(), mime_type=mime))
+            parts.append(types.Part.from_bytes(data=f.read(), mime_type=reference_mime_type(p)))
     return parts
 
 
@@ -170,14 +179,28 @@ def generate(prompt, negative_prompt, output_filename, model=None, reference_pat
         contents.append(types.Part.from_text(text=build_prompt(prompt, negative_prompt)))
 
     print(f"[{output_filename}] Generating {'presenter composite' if composite else 'product still'}...")
-    response = client.models.generate_content(
-        model=model,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(aspect_ratio=ASPECT_RATIO, image_size=IMAGE_SIZE),
-        ),
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio=ASPECT_RATIO, image_size=IMAGE_SIZE),
+            ),
+        )
+    except Exception as err:
+        # Same wrapping as veo_generator.py (M12b). Unwrapped, an SDK exception
+        # escapes as a raw traceback: the adapter surfaces stderr, so the
+        # operator gets a Python stack instead of the vendor's reason, and the
+        # default exit code (1) burns all three attempts on a request the API
+        # rejects identically every time — e.g. an unsupported image MIME type.
+        # This is the API's answer, not the model's: a content refusal is
+        # handled below and stays retryable.
+        fail(
+            output_filename,
+            f"nano banana rejected the generation request — {describe_api_error(err)}",
+            retryable=is_retryable_api_error(err),
+        )
 
     image_bytes = extract_image_bytes(response)
     if not image_bytes:

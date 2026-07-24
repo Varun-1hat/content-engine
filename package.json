@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/coverage.test.ts tests/stages.test.ts tests/generators.test.mjs"
+    "test": "node --experimental-strip-types --test tests/coverage.test.ts tests/stages.test.ts tests/generators.test.mjs tests/duration.test.ts tests/product.test.ts tests/download.test.ts tests/release-closeout.acceptance.test.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

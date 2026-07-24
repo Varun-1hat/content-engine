@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { getVisualAdapter } from '@/lib/adapters/visual';
 import { getJobStagePlan } from '@/lib/pipeline/stages';
+import { wordBudgetFor } from '@/lib/pipeline/duration';
 import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 import { productBlock, fetchProductImages } from '@/lib/pipeline/product';
 
@@ -33,7 +35,9 @@ export async function POST(req: Request) {
     await startStage(jobId, 'script');
 
     const durationNum = targetDuration ? parseInt(targetDuration) : 45;
-    const targetWordCount = Math.round(durationNum * c.speechWordsPerSec);
+    // Shared with adapt_voice (pipeline/duration.ts) so the two stages ask for
+    // the same length instead of drifting apart with two copies of the formula.
+    const targetWordCount = wordBudgetFor(durationNum, c.speechWordsPerSec);
 
     const prompt = `${c.researchDoc}${productBlock(job)}
 
@@ -61,12 +65,18 @@ Return ONLY a strictly valid JSON object matching this exact structure (do NOT w
   "englishScript": "The raw script text separated by section headers (e.g., THE HOOK, EXPLANATION, etc). A single formatted string with line breaks."
 }`;
 
-    const raw = await getScriptAdapter(c.script.provider).generate({
+    // Photo count from the visual adapter, payload ceiling from the script
+    // adapter — each cap read off the model that actually has it.
+    const script = getScriptAdapter(c.script.provider);
+    const raw = await script.generate({
       prompt,
       model: c.script.model,
       fallbackModel: c.script.fallbackModel,
       json: true,
-      images: await fetchProductImages(job),
+      images: await fetchProductImages(job, {
+        maxImages: getVisualAdapter(c.visual.provider).maxReferenceImages,
+        maxTotalBytes: script.maxInlineImagePayloadBytes,
+      }),
     });
     const parsed = extractJson<{ chosenTemplate: string; reasoning: string; englishScript: string }>(raw);
 

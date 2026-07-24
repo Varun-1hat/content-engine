@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server';
 import { loadClientConfig } from '@/lib/clients/loadConfig';
 import { requireUser, forbidClientMismatch } from '@/lib/auth';
 import { getScriptAdapter, extractJson } from '@/lib/adapters/script';
+import { getVisualAdapter } from '@/lib/adapters/visual';
 import { getJob, startStage, completeStage, failStage, stageNotInPlan } from '@/lib/jobs';
 import { getJobStagePlan } from '@/lib/pipeline/stages';
+import { resolveOrderedDurationSec } from '@/lib/pipeline/duration';
 import { hasProduct, productBlock, fetchProductImages } from '@/lib/pipeline/product';
 
 // POST /api/generate-broll-plan — creative-director timeline ('broll_plan' stage).
@@ -84,9 +86,21 @@ You have seen the ${productCount} product photo(s) attached to this request. You
 3. For shots that do NOT contain the product (lifestyle, context, reaction), omit "features_product" or set it false.
 
 RULES:
-- "features_product": true is ONLY valid on "media_type": "video". A generated still ("media_type": "image") CANNOT be conditioned on the photos and would invent a different product — use option 1 or 2 instead.
+- "features_product": true is ONLY valid on "media_type": "video". When you want a STILL that shows the real product, use option 1 — the uploaded photo IS the product, exactly, with nothing generated.
 - Never set "features_product": true on a shot that does not actually show the product.`
       : '';
+    // ⚠️ DEFERRED DESIGN QUESTION — STATUS.md §3 R15. The rule above keeps
+    // `features_product` to videos. That is the shipped, proven routing, but it
+    // is a PRODUCT decision, not a technical limit: a reference-conditioned
+    // still is supported end to end (adapters/visual/veo_imagen.ts routes
+    // image + refs to nanobanana_generator.py, which conditions on the photos;
+    // assemble-video/route.ts already passes both). The earlier wording claimed
+    // the limit was technical — it was not.
+    // Whether a product still SHOULD go that route is open and deliberately
+    // undecided: it trades a zero-generation exact photo for a generated frame,
+    // and stills contribute silence to a no-VO concat reel (R13). Do not settle
+    // it by quietly editing this wording; a change here moves the b-roll plan's
+    // composition and needs a before/after comparison run.
 
     const systemInstruction = `${c.creativeDirectorPrompt}${productBlock(job)}
 
@@ -124,7 +138,17 @@ Use this format exactly:
     let timingBlock: string;
     if (noAvatar) {
       const narrationEnd = lastTimestampEnd(timestamps);
-      const targetN = narrationEnd ?? job.target_duration_sec ?? 45;
+      // The narration's real end wins; failing that, what the reel was ordered
+      // at (its own target, else its pipeline's default). NO hardcoded literal:
+      // tiling against an invented 45s silently produces a reel of the wrong
+      // length, and duration_default_sec is `not null`, so the only way to reach
+      // this failure is a reel whose pipeline binding has been orphaned.
+      const targetN = narrationEnd ?? resolveOrderedDurationSec(job, c.pipelines);
+      if (targetN === null) {
+        throw new Error(
+          'This reel has no narration timeline and no ordered duration (no target duration recorded on the reel, and its pipeline is not available to supply a default), so there is nothing to tile the B-roll against. Set a target duration on the reel, or re-bind it to an active pipeline.'
+        );
+      }
       timingBlock = `These clips ARE the entire visual track — there is no presenter to overlay onto. TOTAL DURATION: ${targetN} seconds.
 Emit clips that tile the full 0..${targetN}s CONTIGUOUSLY: the first clip starts at 0, every clip's start_second equals the previous clip's end_second, and the last clip ends at exactly ${targetN}. Leave NO gaps — a gap is not empty screen, it is content that gets cut from the reel.
 Vary shot types, angles and subjects so the reel is visually engaging on its own.`;
@@ -147,13 +171,19 @@ ${script}
 
 ${timingBlock}${frequencyLine}${editorLine}`;
 
-    const raw = await getScriptAdapter(c.script.provider).generate({
+    // Photo count from the visual adapter, payload ceiling from the script
+    // adapter — each cap read off the model that actually has it.
+    const scriptAdapter = getScriptAdapter(c.script.provider);
+    const raw = await scriptAdapter.generate({
       system: systemInstruction,
       prompt: userPrompt,
       model: c.script.structuredModel,
       fallbackModel: c.script.fallbackModel,
       json: true,
-      images: await fetchProductImages(job),
+      images: await fetchProductImages(job, {
+        maxImages: getVisualAdapter(c.visual.provider).maxReferenceImages,
+        maxTotalBytes: scriptAdapter.maxInlineImagePayloadBytes,
+      }),
     });
 
     let brollPlan: any = extractJson(raw);

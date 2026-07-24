@@ -1,5 +1,6 @@
 import type { CharacterAlignment } from '../adapters/voice/base';
 import { getFfmpeg } from './ffmpeg';
+import { stripUnspokenMarkup } from './duration';
 
 // Vendor-free audio pipeline: text preprocessing, alignment parsing, and
 // ffmpeg normalization. Extracted from generate-audio/route.ts unchanged.
@@ -14,11 +15,13 @@ export interface SentenceTimestamp {
 /**
  * Prepare a UI script for TTS: strip section headers (THE HOOK:, ...),
  * emotion/pause brackets, and excess whitespace.
+ *
+ * The stripping half lives in ./duration (which imports no ffmpeg) so the
+ * Studio's spoken-duration estimate counts exactly what the voice vendor
+ * receives. Output is byte-identical to the previous inline implementation.
  */
 export function prepareScriptForTts(raw: string): string {
-  let text = raw.replace(/^[A-Z0-9\s]+:/gm, '').trim();
-  text = text.replace(/\[.*?\]/g, '');
-  return text.replace(/\s+/g, ' ').trim();
+  return stripUnspokenMarkup(raw).replace(/\s+/g, ' ').trim();
 }
 
 /**
