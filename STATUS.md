@@ -214,7 +214,47 @@ Method: one throwaway job created via the real `createJob` and **deleted afterwa
 
 ⚠️ **HeyGen's CDN (`files2`/`resource2.heygen.ai`) is unreachable from the dev sandbox — `ECONNRESET`** — while `api.heygen.com` and Cloudinary work. Criterion 40 was therefore proven with a real presenter still transcoded to webp rather than fetched live. Production succeeded on this path in v5, so this is sandbox egress, not a code defect — and it doubles as a live demonstration that the criterion-33 downgrade fires when the CDN is down.
 
-**Still unverified — VIDEO RENDERS ONLY, held by decision, never recorded as passing:** criteria 1–5, 9, 16, 17, 35 (`[studio]`, no DOM harness) · **10** (avatar render half) · **32** (full-reel regression) · the render half of **33**. Everything else is now executed and verified.
+### Round 3 — driven through the real Studio UI (2026-07-24)
+
+Three reels created in one session on the live `kiran` client. No vendor spend beyond Gemini text.
+
+| Criterion | Result |
+|---|---|
+| **1** | ✅ Clicked Minimal → **Start Reel immediately** (the exact R14 sequence). Row read `broll_frequency: "Minimal"` at `current_stage: topic / pending` — i.e. **before `broll_plan` ran**. In v5 this read "Standard". |
+| **2** | ✅ Chip changed to Minimal on the Architect screen → PATCH persisted → `broll_plan` ran and completed still reading **"Minimal"**, producing 2 clips for 15 s (correct Minimal density). |
+| **3** | ✅ Left the reel (All Reels) and reopened it — Architect chip restored to **Minimal**, not defaulted. |
+| **4** | ⚠️ **Verified in substance, not by button.** The admin retry control only renders for a **failed** stage, and none failed. `admin/jobs/page.tsx` re-sends `job.broll_frequency` (code untouched) and the row now holds the user's choice from creation onward — which was the actual defect. Exercising the button needs a deliberately failed stage. |
+| **5** | ✅ Three consecutive reels: **Minimal/false**, **High/true**, **Standard/false** — each row carried its own selection, no contamination. |
+| **9** | ✅ Hand-trimmed in the editor: 69 w/28.8 s → 44 w/18.0 s, flag cleared, **URL unchanged**. Recomputes per keystroke from the edit buffer. |
+| **10** (Studio half) | ✅ With a 14.0 s overshoot showing, "Next: Architect Video" was **enabled**. The flag disables nothing. |
+| **16** | ✅ "Make this reel about the product" sits with Include-voiceover / Use-my-own-script, defaults OFF, **appears only once a photo is attached**, and `product_overrides_research: true` was captured at creation. |
+| **18** (Studio half) | ✅ On the non-product Full E2E pipeline the toggle is absent entirely. |
+| **35** | ✅ Stated **above** the picker: *"Up to 3 per reel … Photos may total up to **12 MB** for the whole reel."* — reel-total axis, same number that is enforced. |
+| **37** (display half) | ✅ Count shown as `1/3`. |
+| **Two-sided rule, live** | ✅ Over-trimming flipped the badge from *"8.8 s **over**"* to *"9.6 s **under**"* — the ±5 s rule the user asked for, in the real UI. |
+| **Double-click fix, live** | ✅ Sampled the Continue button at 0/16/50/150/400 ms after click: **`disabled: true` from the first sample**, label switched to "Planning Visuals". The spend window is closed. |
+| **Plan-driven stepper** | ✅ No-VO reel rendered **Topic → Script → Architect → Assets → Final** (no Audio step) with the button reading "Continue to Assets". |
+
+### Round 4 — Reel B rendered live: concat assembly + the new guard (2026-07-24)
+
+Job `d566c418` (Product ad, no voiceover), assembled through the Studio. **2 Veo clips.**
+
+**Final: `kiran/assembled/tegjwf6ku6tpxa0waplu.mp4` — 15.000000 s exactly, 1080×1920 h264, aac 44 100 Hz stereo, 4.86 MB.**
+
+| Check | Result |
+|---|---|
+| Duration | ✅ **exactly 15.000 s** = Σ(2 × 7.5 s) — the concat arithmetic, matching the ordered duration |
+| Assembly path | ✅ 44.1 kHz confirms it went through `concatBrolls` (overlay yields 48 kHz) |
+| New ordered-duration guard | ✅ correctly **silent** — plan covered 15 s of 15 s ordered |
+| Veo native audio | ✅ mean **−31.2 dB** / max −10.3 dB. Healthier than v5's −43.5 dB because this plan had no `product_image` still, so **no silent lead-in — R13 does not bite here** |
+| Product fidelity | ✅ both frames verified: t=3 s hand adding pickle to a steel katori; t=11 s **the white ceramic bowl from the uploaded photo**, gold bangle, Indian kitchen |
+| **M12 path (webp refs → Veo)** | ✅ **PROVEN** — both clips generated from the `.webp` product photo through the refactored shared MIME map |
+
+**First attempt failed, and the failure was itself informative.** Clip #2 hit **Veo's safety filter** (R12) — 3 attempts, all filtered. What that proved: the error surfaced as Veo's *own words* ("…issue with the audio for your prompt… **You have not been charged**"), **not a Python traceback** (M2/M4/M12b working); content refusals were correctly classed **retryable** so it retried 3×; and the stage **failed rather than shipping a reel with a hole**. One retry then succeeded — exactly the non-determinism §7 Watch records. No spend was burned on the filtered attempts.
+
+**Still unverified — held by decision, never recorded as passing:** **10** (avatar-render half) · **32** (full-reel regression) · the render half of **33** — all three need **Reel A** (`50ef9060`, 1 HeyGen render + ~2 Veo + 1 ElevenLabs). Plus **4** and **17**'s retry-button paths, which need a deliberately failed stage. Everything else is executed and verified.
+
+**Two reels are parked ready for the video sweep:** `50ef9060` (Avatar + product, High, override ON, 1 photo) and `d566c418` (Product ad no-VO, Minimal, b-roll plan done, tiles 0→7.5→15 contiguously).
 
 ## 7. Watch
 
